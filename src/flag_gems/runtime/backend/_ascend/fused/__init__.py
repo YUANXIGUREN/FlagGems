@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .causal_conv1d_decode import causal_conv1d_decode
+from .causal_conv1d_prefill import causal_conv1d_prefill
 from .cross_entropy_loss import cross_entropy_loss
 from .flash_mla import flash_mla
 from .fused_add_rms_norm import fused_add_rms_norm
@@ -31,6 +32,7 @@ from .sparse_attention import sparse_attn_triton
 
 __all__ = [
     "causal_conv1d_decode",
+    "causal_conv1d_prefill",
     "cross_entropy_loss",
     "apply_rotary_pos_emb",
     "flash_mla",

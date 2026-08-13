@@ -1631,6 +1631,21 @@ ops:
       - NeuralNetwork
     stages:
       - alpha: '5.4'
+  - id: causal_conv1d_prefill
+    description: |
+      Ascend fused causal 1D convolution for the prefill (varlen) step of
+      state-space / linear-attention models. Computes the convolution output and
+      updates the conv state cache in place, replacing vllm's causal_conv1d_fn.
+    for:
+      - vllm.attention.ops.causal_conv1d.causal_conv1d_fn
+    labels:
+      - fused
+      - Convolution
+      - Ascend
+    kind:
+      - NeuralNetwork
+    stages:
+      - alpha: '5.4'
   - id: cdist_backward
     description: |
       Computes the backward pass for the batched pairwise distance (cdist) computation,
