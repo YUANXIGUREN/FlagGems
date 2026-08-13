@@ -1615,6 +1615,22 @@ ops:
       - Distribution
     stages:
       - beta: '5.3'
+  - id: causal_conv1d_decode
+    description: |
+      Ascend fused causal 1D convolution for the decode (single/multi-token update)
+      step of state-space / linear-attention models. Updates the paged conv state
+      cache in place and applies the activation, replacing vllm's
+      causal_conv1d_update.
+    for:
+      - vllm.attention.ops.causal_conv1d.causal_conv1d_update
+    labels:
+      - fused
+      - Convolution
+      - Ascend
+    kind:
+      - NeuralNetwork
+    stages:
+      - alpha: '5.4'
   - id: cdist_backward
     description: |
       Computes the backward pass for the batched pairwise distance (cdist) computation,
