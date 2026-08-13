@@ -5355,6 +5355,21 @@ ops:
     stages:
       - beta: '5.0'
       - stable: '5.3'
+  - id: lightning_indexer
+    description: |
+      Ascend fused sparse-attention indexer. For each query token it computes the
+      top-k key block indices (and optional scores) used by the DeepSeek-style
+      sparse attention, replacing the CANN torch_npu.npu_lightning_indexer op.
+    for:
+      - torch_npu.npu_lightning_indexer
+    labels:
+      - fused
+      - Attention
+      - Ascend
+    kind:
+      - NeuralNetwork
+    stages:
+      - alpha: '5.4'
   - id: linalg_ldl_solve
     description: Triton kernel implementation for linalg_ldl_solve.
     for:
