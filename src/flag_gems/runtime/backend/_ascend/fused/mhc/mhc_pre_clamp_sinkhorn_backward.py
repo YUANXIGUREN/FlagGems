@@ -542,32 +542,6 @@ def _fused_gemm_rmsbwd_ybwd_kernel(
     p2 = tl.load(pre_ptr + pid * 4 + 2)
     p3 = tl.load(pre_ptr + pid * 4 + 3)
 
-    # Load grad_mixes (24 scalars) — reused across all D-blocks
-    gm00 = tl.load(grad_mixes_ptr + gm_base + 0)
-    gm01 = tl.load(grad_mixes_ptr + gm_base + 1)
-    gm02 = tl.load(grad_mixes_ptr + gm_base + 2)
-    gm03 = tl.load(grad_mixes_ptr + gm_base + 3)
-    gm04 = tl.load(grad_mixes_ptr + gm_base + 4)
-    gm05 = tl.load(grad_mixes_ptr + gm_base + 5)
-    gm06 = tl.load(grad_mixes_ptr + gm_base + 6)
-    gm07 = tl.load(grad_mixes_ptr + gm_base + 7)
-    gm08 = tl.load(grad_mixes_ptr + gm_base + 8)
-    gm09 = tl.load(grad_mixes_ptr + gm_base + 9)
-    gm10 = tl.load(grad_mixes_ptr + gm_base + 10)
-    gm11 = tl.load(grad_mixes_ptr + gm_base + 11)
-    gm12 = tl.load(grad_mixes_ptr + gm_base + 12)
-    gm13 = tl.load(grad_mixes_ptr + gm_base + 13)
-    gm14 = tl.load(grad_mixes_ptr + gm_base + 14)
-    gm15 = tl.load(grad_mixes_ptr + gm_base + 15)
-    gm16 = tl.load(grad_mixes_ptr + gm_base + 16)
-    gm17 = tl.load(grad_mixes_ptr + gm_base + 17)
-    gm18 = tl.load(grad_mixes_ptr + gm_base + 18)
-    gm19 = tl.load(grad_mixes_ptr + gm_base + 19)
-    gm20 = tl.load(grad_mixes_ptr + gm_base + 20)
-    gm21 = tl.load(grad_mixes_ptr + gm_base + 21)
-    gm22 = tl.load(grad_mixes_ptr + gm_base + 22)
-    gm23 = tl.load(grad_mixes_ptr + gm_base + 23)
-
     # Pass 1: accumulate dot(x, grad_x_scaled) and grad_pre
     dot = 0.0
     gp0 = tl.zeros([], dtype=tl.float32)
@@ -698,7 +672,6 @@ def _small_stage_bwd_kernel_hc4(
     sb = pid * ITERS * 16
 
     # ---- FORWARD RECOMPUTE (pre / post / logits / sinkhorn) ----
-    m_pre = tl.arange(0, 4)
     # Load per-token mixes/base slices
     mix_pre0 = tl.load(mixes_ptr + mb + 0)
     mix_pre1 = tl.load(mixes_ptr + mb + 1)
