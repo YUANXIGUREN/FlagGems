@@ -34,6 +34,7 @@ from .prod import prod, prod_dim
 from .repeat_interleave import repeat_interleave_self_tensor
 from .resolve_conj import resolve_conj
 from .sigmoid import sigmoid
+from .silu import silu
 from .special_bessel_j0 import special_bessel_j0, special_bessel_j0_out
 from .special_shifted_chebyshev_polynomial_w import (
     special_shifted_chebyshev_polynomial_w,
@@ -94,6 +95,7 @@ __all__ = [
     "repeat_interleave_self_tensor",
     "resolve_conj",
     "sigmoid",
+    "silu",
     "special_bessel_j0",
     "special_bessel_j0_out",
     "special_shifted_chebyshev_polynomial_w",
