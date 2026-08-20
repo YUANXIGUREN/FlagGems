@@ -52,9 +52,9 @@ def _make_silu_edge_input(case, dtype):
             device=flag_gems.device,
         ).to(dtype)
     if case == "non_contiguous":
-        return torch.randn(
-            (257, 259), dtype=dtype, device=flag_gems.device
-        ).transpose(0, 1)
+        return torch.randn((257, 259), dtype=dtype, device=flag_gems.device).transpose(
+            0, 1
+        )
     if case == "empty":
         return torch.empty((0, 17), dtype=dtype, device=flag_gems.device)
     if case == "special_values":

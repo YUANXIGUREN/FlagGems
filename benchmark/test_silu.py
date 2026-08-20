@@ -21,7 +21,6 @@ import flag_gems
 
 from . import base, consts, utils
 
-
 SILU_GRID_BALANCE_SHAPES = [
     (1024, 131073),
     (64, 64, 40961),
