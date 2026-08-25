@@ -27,11 +27,9 @@ from flag_gems.ops.index_add import index_add_ as _common_index_add_
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
-from flag_gems.utils.triton_version_utils import _triton_version_at_least
 
 logger = logging.getLogger(__name__)
 
-_TRITON_SUPPORTS_BF16_ATOMIC_ADD = _triton_version_at_least(3, 4)
 _CONTIGUOUS_SUFFIX_TILE_MIN = 80
 _FALLBACK_KEYSET = torch._C.DispatchKeySet(
     torch._C.DispatchKey.CompositeExplicitAutograd
@@ -393,9 +391,9 @@ def index_add(inp, dim, index, src, alpha=1):
         return _common_index_add(inp, dim, index, src, alpha)
 
     _assert_index_in_bounds(index, inp.size(normalized_dim))
-    accumulate_fp32 = (
-        inp.dtype == torch.bfloat16 and not _TRITON_SUPPORTS_BF16_ATOMIC_ADD
-    )
+    # MetaX BF16 atomic support cannot be inferred from the frontend Triton
+    # version, so use the portable FP32 accumulation path unconditionally.
+    accumulate_fp32 = inp.dtype == torch.bfloat16
     out = inp.float() if accumulate_fp32 else inp.clone()
     res = _run_contiguous_suffix_path(
         out, normalized_dim, index.contiguous(), src, alpha
@@ -426,9 +424,7 @@ def index_add_(inp, dim, index, src, alpha=1):
         return _common_index_add_(inp, dim, index, src, alpha)
 
     _assert_index_in_bounds(index, inp.size(normalized_dim))
-    accumulate_fp32 = (
-        inp.dtype == torch.bfloat16 and not _TRITON_SUPPORTS_BF16_ATOMIC_ADD
-    )
+    accumulate_fp32 = inp.dtype == torch.bfloat16
     out = inp.float() if accumulate_fp32 else inp
     res = _run_contiguous_suffix_path(
         out, normalized_dim, index.contiguous(), src, alpha
