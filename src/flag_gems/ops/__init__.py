@@ -178,6 +178,7 @@ from flag_gems.ops.alias import alias
 from flag_gems.ops.alias_copy import alias_copy, alias_copy_out
 from flag_gems.ops.all import all, all_dim, all_dims
 from flag_gems.ops.alpha_dropout import alpha_dropout
+from flag_gems.ops.alpha_dropout_ import alpha_dropout_
 from flag_gems.ops.amax import amax
 from flag_gems.ops.amin import amin, amin_
 from flag_gems.ops.aminmax import aminmax
@@ -327,9 +328,9 @@ from flag_gems.ops.div import (
     div_mode_,
     floor_divide,
     floor_divide_,
-    true_divide_,
     true_divide_out,
 )
+from flag_gems.ops.divide import divide
 from flag_gems.ops.dot import dot
 from flag_gems.ops.dropout import dropout, dropout_backward
 from flag_gems.ops.elu import elu, elu_, elu_backward
@@ -440,9 +441,12 @@ from flag_gems.ops.hadamard_transform import (
 from flag_gems.ops.hardshrink import hardshrink, hardshrink_out
 from flag_gems.ops.hardsigmoid import hardsigmoid, hardsigmoid_out
 from flag_gems.ops.hardsigmoid_ import hardsigmoid_
+from flag_gems.ops.hardsigmoid_backward import hardsigmoid_backward
 from flag_gems.ops.hardswish import hardswish, hardswish_out
 from flag_gems.ops.hardswish_ import hardswish_
+from flag_gems.ops.hardswish_backward import hardswish_backward
 from flag_gems.ops.hardtanh_ import hardtanh_
+from flag_gems.ops.hardtanh_backward import hardtanh_backward
 from flag_gems.ops.heaviside import heaviside
 from flag_gems.ops.heaviside_ import heaviside_
 from flag_gems.ops.histc import histc
@@ -579,6 +583,7 @@ from flag_gems.ops.mean import mean, mean_dim
 from flag_gems.ops.median import median, median_dim, median_dim_values, median_out
 from flag_gems.ops.min import min, min_dim
 from flag_gems.ops.minimum import minimum
+from flag_gems.ops.miopen_batch_norm import miopen_batch_norm
 from flag_gems.ops.miopen_batch_norm_backward import miopen_batch_norm_backward
 from flag_gems.ops.mish import mish, mish_
 from flag_gems.ops.mish_backward import mish_backward
@@ -605,7 +610,9 @@ from flag_gems.ops.nanmedian import (
 from flag_gems.ops.nansum import nansum, nansum_out
 from flag_gems.ops.narrow import narrow
 from flag_gems.ops.narrow_copy import narrow_copy
+from flag_gems.ops.native_batch_norm import native_batch_norm
 from flag_gems.ops.native_dropout_backward import native_dropout_backward
+from flag_gems.ops.native_group_norm import native_group_norm
 from flag_gems.ops.native_layer_norm import native_layer_norm
 from flag_gems.ops.ne import ne, ne_scalar
 from flag_gems.ops.ne_ import ne_, ne_scalar_
@@ -661,6 +668,7 @@ from flag_gems.ops.pow import (
 from flag_gems.ops.prelu import prelu
 from flag_gems.ops.prod import prod, prod_dim
 from flag_gems.ops.quantile import quantile
+from flag_gems.ops.quantized_lstm import quantized_lstm
 from flag_gems.ops.rad2deg import rad2deg, rad2deg_
 from flag_gems.ops.rand import rand
 from flag_gems.ops.rand_like import rand_like
@@ -701,6 +709,7 @@ from flag_gems.ops.resize_as import resize_as, resize_as_
 from flag_gems.ops.resolve_conj import resolve_conj
 from flag_gems.ops.resolve_neg import resolve_neg
 from flag_gems.ops.rms_norm import rms_norm, rms_norm_backward, rms_norm_forward
+from flag_gems.ops.rms_norm_w8a16_fp8 import rms_norm_w8a16_fp8
 from flag_gems.ops.rnn_relu import rnn_relu
 from flag_gems.ops.roll import roll
 from flag_gems.ops.rot90 import rot90
@@ -790,6 +799,7 @@ from flag_gems.ops.special_erfinv import (
 from flag_gems.ops.special_exp2 import special_exp2
 from flag_gems.ops.special_expit import special_expit
 from flag_gems.ops.special_gammainc import special_gammainc
+from flag_gems.ops.special_gammaincc import special_gammaincc
 from flag_gems.ops.special_gammaln import special_gammaln, special_gammaln_out
 from flag_gems.ops.special_hermite_polynomial_h import special_hermite_polynomial_h
 from flag_gems.ops.special_i0e import special_i0e, special_i0e_out
@@ -797,6 +807,7 @@ from flag_gems.ops.special_i1 import special_i1, special_i1_out
 from flag_gems.ops.special_i1e import special_i1e
 from flag_gems.ops.special_legendre_polynomial_p import special_legendre_polynomial_p
 from flag_gems.ops.special_log1p import special_log1p, special_log1p_out
+from flag_gems.ops.special_log_ndtr import special_log_ndtr
 from flag_gems.ops.special_log_softmax import special_log_softmax
 from flag_gems.ops.special_logit import special_logit, special_logit_out
 from flag_gems.ops.special_logsumexp import special_logsumexp
@@ -859,6 +870,7 @@ from flag_gems.ops.transpose import transpose
 from flag_gems.ops.tril import tril, tril_, tril_out
 from flag_gems.ops.triu import triu, triu_
 from flag_gems.ops.true_divide import true_divide, true_divide_tensor
+from flag_gems.ops.true_divide_ import true_divide_, true_divide_tensor_
 from flag_gems.ops.trunc_ import trunc, trunc_
 from flag_gems.ops.unbind import unbind
 from flag_gems.ops.unbind_copy import unbind_copy
@@ -1056,6 +1068,7 @@ __all__ = [
     "all_dims",
     "allclose",
     "alpha_dropout",
+    "alpha_dropout_",
     "amax",
     "amin",
     "amin_",
@@ -1226,6 +1239,7 @@ __all__ = [
     "dist",
     "div_mode",
     "div_mode_",
+    "divide",
     "dot",
     "dropout",
     "dropout_backward",
@@ -1357,12 +1371,15 @@ __all__ = [
     "hardshrink",
     "hardshrink_out",
     "hardsigmoid",
+    "hardsigmoid_backward",
     "hardsigmoid_out",
     "hardsigmoid_",
     "hardswish",
     "hardswish_",
+    "hardswish_backward",
     "hardswish_out",
     "hardtanh_",
+    "hardtanh_backward",
     "heaviside",
     "heaviside_",
     "histc",
@@ -1542,6 +1559,7 @@ __all__ = [
     "min",
     "min_dim",
     "minimum",
+    "miopen_batch_norm",
     "miopen_batch_norm_backward",
     "mish",
     "mish_",
@@ -1570,7 +1588,9 @@ __all__ = [
     "nansum_out",
     "narrow",
     "narrow_copy",
+    "native_batch_norm",
     "native_dropout_backward",
+    "native_group_norm",
     "native_layer_norm",
     "ne",
     "ne_scalar",
@@ -1632,6 +1652,7 @@ __all__ = [
     "prod",
     "prod_dim",
     "quantile",
+    "quantized_lstm",
     "rad2deg",
     "rad2deg_",
     "rand",
@@ -1681,6 +1702,7 @@ __all__ = [
     "rms_norm",
     "rms_norm_backward",
     "rms_norm_forward",
+    "rms_norm_w8a16_fp8",
     "te_rmsnorm_bwd",
     "te_rmsnorm_fwd",
     "rnn_relu",
@@ -1784,6 +1806,7 @@ __all__ = [
     "special_exp2",
     "special_expit",
     "special_gammainc",
+    "special_gammaincc",
     "special_gammaln",
     "special_gammaln_out",
     "special_hermite_polynomial_h",
@@ -1793,6 +1816,7 @@ __all__ = [
     "special_i1_out",
     "special_i1e",
     "special_legendre_polynomial_p",
+    "special_log_ndtr",
     "special_log_softmax",
     "special_log1p",
     "special_log1p_out",
@@ -1864,6 +1888,7 @@ __all__ = [
     "true_divide_",
     "true_divide_out",
     "true_divide_tensor",
+    "true_divide_tensor_",
     "trunc",
     "trunc_",
     "unbind",
