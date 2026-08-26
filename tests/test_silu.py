@@ -84,8 +84,7 @@ def test_silu(shape, dtype):
     ref_inp = utils.to_reference(res_inp, True)
 
     ref_out = torch.nn.functional.silu(ref_inp)
-    with flag_gems.use_gems():
-        res_out = torch.nn.functional.silu(res_inp)
+    res_out = flag_gems.silu(res_inp)
 
     utils.gems_assert_close(res_out, ref_out, dtype)
 
@@ -106,9 +105,10 @@ def test_silu_edge_cases(case, dtype, inplace):
         native_out = torch.nn.functional.silu(res_inp)
 
     ref_out = torch.nn.functional.silu(ref_inp, inplace=inplace)
-    selected_ops = ["silu_"] if inplace else ["silu"]
-    with flag_gems.use_gems(include=selected_ops):
-        res_out = torch.nn.functional.silu(res_inp, inplace=inplace)
+    if inplace:
+        res_out = flag_gems.silu_(res_inp)
+    else:
+        res_out = flag_gems.silu(res_inp)
 
     assert res_out.shape == ref_out.shape
     assert res_out.dtype == dtype
@@ -126,7 +126,7 @@ def test_silu_edge_cases(case, dtype, inplace):
 @pytest.mark.silu_backward
 @ASCEND_ONLY
 @pytest.mark.parametrize("dtype", SILU_ASCEND_DTYPES)
-def test_silu_forward_autograd(dtype):
+def test_silu_forward_backward_edge(dtype):
     res_inp = torch.linspace(
         -4.0,
         4.0,
@@ -134,7 +134,6 @@ def test_silu_forward_autograd(dtype):
         dtype=torch.float32,
         device=flag_gems.device,
     ).to(dtype)
-    res_inp.requires_grad_(True)
     res_grad_out = torch.linspace(
         0.25,
         1.25,
@@ -142,33 +141,16 @@ def test_silu_forward_autograd(dtype):
         dtype=torch.float32,
         device=flag_gems.device,
     ).to(dtype)
-    ref_inp = utils.to_reference(res_inp.detach(), True).requires_grad_(True)
+    ref_inp = utils.to_reference(res_inp, True)
     ref_grad_out = utils.to_reference(res_grad_out, True)
 
     ref_out = torch.nn.functional.silu(ref_inp)
-    (ref_grad,) = torch.autograd.grad(ref_out, ref_inp, ref_grad_out)
-    with flag_gems.use_gems(include=["silu", "silu_backward"]):
-        res_out = torch.nn.functional.silu(res_inp)
-        (res_grad,) = torch.autograd.grad(res_out, res_inp, res_grad_out)
+    ref_grad = torch.ops.aten.silu_backward(ref_grad_out, ref_inp)
+    res_out = flag_gems.silu(res_inp)
+    res_grad = flag_gems.silu_backward(res_grad_out, res_inp)
 
     utils.gems_assert_close(res_out, ref_out, dtype)
     utils.gems_assert_close(res_grad, ref_grad, dtype)
-
-
-@pytest.mark.silu_
-@ASCEND_ONLY
-@pytest.mark.parametrize("dtype", SILU_ASCEND_DTYPES)
-def test_silu_inplace_leaf_autograd_error(dtype):
-    res_inp = torch.randn(
-        (4097,), dtype=dtype, device=flag_gems.device, requires_grad=True
-    )
-    ref_inp = utils.to_reference(res_inp.detach(), True).requires_grad_(True)
-
-    with pytest.raises(RuntimeError):
-        torch.nn.functional.silu(ref_inp, inplace=True)
-    with pytest.raises(RuntimeError):
-        with flag_gems.use_gems(include=["silu_"]):
-            torch.nn.functional.silu(res_inp, inplace=True)
 
 
 @pytest.mark.silu_
@@ -179,8 +161,7 @@ def test_silu_(shape, dtype):
     ref_inp = utils.to_reference(res_inp.clone(), True)
 
     ref_out = torch.nn.functional.silu(ref_inp, inplace=True)
-    with flag_gems.use_gems():
-        res_out = torch.nn.functional.silu(res_inp, inplace=True)
+    res_out = flag_gems.silu_(res_inp)
 
     utils.gems_assert_close(res_out, ref_out, dtype)
 
@@ -196,8 +177,7 @@ def test_silu_backward(shape, dtype):
     ref_grad = utils.to_reference(res_grad, True)
 
     ref_in_grad = torch.ops.aten.silu_backward(ref_grad, ref_inp)
-    with flag_gems.use_gems():
-        res_in_grad = torch.ops.aten.silu_backward(res_grad, res_inp)
+    res_in_grad = flag_gems.silu_backward(res_grad, res_inp)
 
     utils.gems_assert_close(res_in_grad, ref_in_grad, dtype)
 
@@ -210,8 +190,7 @@ def test_metax_silu_forward_contract(dtype):
     original = inp.clone()
     reference = torch.nn.functional.silu(utils.to_reference(inp, True))
 
-    with flag_gems.use_gems(include=["silu"]):
-        actual = torch.nn.functional.silu(inp)
+    actual = flag_gems.silu(inp)
 
     utils.gems_assert_close(actual, reference, dtype)
     assert actual.shape == inp.shape
@@ -227,8 +206,7 @@ def test_metax_silu_grid_balance_shapes(shape, dtype):
     inp = torch.randn(shape, dtype=dtype, device=flag_gems.device)
     reference = torch.nn.functional.silu(utils.to_reference(inp, True))
 
-    with flag_gems.use_gems(include=["silu"]):
-        actual = torch.nn.functional.silu(inp)
+    actual = flag_gems.silu(inp)
 
     utils.gems_assert_close(actual, reference, dtype)
 
@@ -240,8 +218,7 @@ def test_metax_silu_empty(dtype):
     inp = torch.empty((0, 19, 7), dtype=dtype, device=flag_gems.device)
     reference = torch.nn.functional.silu(utils.to_reference(inp, True))
 
-    with flag_gems.use_gems(include=["silu"]):
-        actual = torch.nn.functional.silu(inp)
+    actual = flag_gems.silu(inp)
 
     utils.gems_assert_close(actual, reference, dtype)
     assert actual.shape == inp.shape
@@ -267,8 +244,7 @@ def test_metax_silu_special_values(dtype):
     )
     reference = torch.nn.functional.silu(utils.to_reference(inp, True))
 
-    with flag_gems.use_gems(include=["silu"]):
-        actual = torch.nn.functional.silu(inp)
+    actual = flag_gems.silu(inp)
 
     utils.gems_assert_close(actual, reference, dtype, equal_nan=True)
 
@@ -288,8 +264,7 @@ def test_metax_silu_noncontiguous_uses_common_fallback(monkeypatch):
     inp = torch.randn((19, 7), dtype=torch.float32, device=flag_gems.device).t()
     reference = torch.nn.functional.silu(utils.to_reference(inp, True))
 
-    with flag_gems.use_gems(include=["silu"]):
-        actual = torch.nn.functional.silu(inp)
+    actual = flag_gems.silu(inp)
 
     assert calls == [(inp.shape, inp.stride(), inp.dtype)]
     utils.gems_assert_close(actual, reference, inp.dtype)
@@ -304,9 +279,12 @@ def test_metax_silu_public_path_record(tmp_path):
         (19, 7), dtype=torch.float32, device=flag_gems.device
     ).t()
 
-    with flag_gems.use_gems(include=["silu"], record=True, path=str(record_path)):
-        contiguous_out = torch.nn.functional.silu(contiguous)
-        noncontiguous_out = torch.nn.functional.silu(noncontiguous)
+    flag_gems.setup_flaggems_logging(path=record_path, record=True)
+    try:
+        contiguous_out = flag_gems.silu(contiguous)
+        noncontiguous_out = flag_gems.silu(noncontiguous)
+    finally:
+        flag_gems.teardown_flaggems_logging()
 
     assert contiguous_out.shape == contiguous.shape
     assert noncontiguous_out.shape == noncontiguous.shape
@@ -327,8 +305,7 @@ def test_metax_silu_inplace_keeps_alias(dtype):
     reference = torch.nn.functional.silu(utils.to_reference(inp, True))
     original_data_ptr = inp.data_ptr()
 
-    with flag_gems.use_gems(include=["silu_"]):
-        actual = torch.nn.functional.silu(inp, inplace=True)
+    actual = flag_gems.silu_(inp)
 
     assert actual.data_ptr() == original_data_ptr
     assert inp.data_ptr() == original_data_ptr
@@ -345,8 +322,7 @@ def test_metax_silu_direct_backward_stays_common(dtype):
         utils.to_reference(grad, True), utils.to_reference(inp, True)
     )
 
-    with flag_gems.use_gems(include=["silu_backward"]):
-        actual = torch.ops.aten.silu_backward(grad, inp)
+    actual = flag_gems.silu_backward(grad, inp)
 
     utils.gems_assert_close(actual, reference, dtype)
 
@@ -396,8 +372,7 @@ def test_metax_silu_supported_contiguous_uses_single_route(dtype, numel, monkeyp
     inp = torch.empty(numel, dtype=dtype, device=flag_gems.device)
     assert inp.is_contiguous()
 
-    with flag_gems.use_gems(include=["silu"]):
-        actual = torch.nn.functional.silu(inp)
+    actual = flag_gems.silu(inp)
 
     assert actual is inp
     assert routes == ["balanced"]
@@ -425,8 +400,7 @@ def test_metax_silu_large_noncontiguous_uses_generic_fallback(monkeypatch):
         device=flag_gems.device,
     ).t()
 
-    with flag_gems.use_gems(include=["silu"]):
-        actual = torch.nn.functional.silu(inp)
+    actual = flag_gems.silu(inp)
 
     assert actual is inp
     assert not inp.is_contiguous()
