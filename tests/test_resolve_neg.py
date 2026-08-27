@@ -38,8 +38,7 @@ def test_accuracy_resolve_neg(shape, dtype):
     z = y.imag
     assert z.is_neg()
 
-    with flag_gems.use_gems():
-        out = z.resolve_neg()
+    out = flag_gems.resolve_neg(z)
     assert not out.is_neg()
 
 
@@ -51,11 +50,12 @@ def test_accuracy_resolve_neg(shape, dtype):
 def test_resolve_neg_materializes_logical_values(dtype):
     raw = torch.tensor([-2, 0, 3], dtype=dtype, device=flag_gems.device)
     lazy_negative = torch._neg_view(raw)
-    expected = torch.tensor([2, 0, -3], dtype=dtype, device=flag_gems.device)
+    expected = utils.to_reference(
+        torch.tensor([2, 0, -3], dtype=dtype, device=flag_gems.device)
+    )
     assert lazy_negative.is_neg()
 
-    with flag_gems.use_gems():
-        out = lazy_negative.resolve_neg()
+    out = flag_gems.resolve_neg(lazy_negative)
 
     assert not out.is_neg()
     assert out.data_ptr() != lazy_negative.data_ptr()

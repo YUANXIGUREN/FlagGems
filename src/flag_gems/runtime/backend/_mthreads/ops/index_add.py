@@ -13,26 +13,19 @@
 # limitations under the License.
 
 import logging
-import weakref
-from collections import OrderedDict
-from threading import RLock
 
 import torch
 import triton
 import triton.language as tl
 
 from flag_gems import runtime
+from flag_gems.ops.index_add import _validate_index_add_args
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import dim_compress, libentry
 from flag_gems.utils import triton_lang_extension as ext
 
 logger = logging.getLogger(__name__)
 
-# Keep this cache in the op file: deployment may load this vendor op against an
-# older compatible FlagGems package tree. A shared test contract covers both
-# vendor-local copies.
-_INDEX_BOUNDS_CACHE_MAX_ENTRIES = 128
-_INDEX_BOUNDS_CACHE_MAX_BYTES = 256 * 1024 * 1024
 _INDEX_OUT_OF_BOUNDS_MESSAGE = "0 <= index < self.size(dim)"
 
 
@@ -51,124 +44,12 @@ def _resolve_index_for_kernel(index):
     return index
 
 
-def _index_version_root(index):
-    root = index
-    while root._base is not None:
-        root = root._base
-    return root
-
-
-def _index_bounds_cache_identity(index, upper_bound):
-    try:
-        if index.is_neg() or index.is_conj():
-            return None
-        # Writes through .data or external DMA that do not bump _version are
-        # outside this cache's contract; detecting them would require a sync.
-        version = index._version
-        version_root = _index_version_root(index)
-    except Exception:
-        return None
-
-    try:
-        device = index.device
-        key = (
-            type(index),
-            device.type,
-            device.index,
-            index.data_ptr(),
-            index.numel(),
-            tuple(index.shape),
-            tuple(index.stride()),
-            index.dtype,
-            id(version_root),
-            version,
-            int(upper_bound),
-        )
-        return key, version_root
-    except Exception:
-        return None
-
-
-class _IndexBoundsCache:
-    def __init__(
-        self,
-        max_entries=_INDEX_BOUNDS_CACHE_MAX_ENTRIES,
-        max_bytes=_INDEX_BOUNDS_CACHE_MAX_BYTES,
-    ):
-        self._max_entries = max(0, int(max_entries))
-        self._max_bytes = max(0, int(max_bytes))
-        self._entries = OrderedDict()
-        self._total_bytes = 0
-        self._lock = RLock()
-
-    def assert_in_bounds(self, index, upper_bound, cacheable=True):
-        if index.numel() == 0:
-            return
-
-        cache_enabled = cacheable and self._max_entries > 0 and self._max_bytes > 0
-        identity = (
-            _index_bounds_cache_identity(index, upper_bound) if cache_enabled else None
-        )
-        if identity is not None:
-            key, version_root = identity
-            with self._lock:
-                entry = self._entries.get(key)
-                if entry is not None:
-                    confirmed_identity = _index_bounds_cache_identity(
-                        index, upper_bound
-                    )
-                    if confirmed_identity is not None:
-                        confirmed_key, confirmed_root = confirmed_identity
-                        if (
-                            confirmed_key == key
-                            and confirmed_root is version_root
-                            and entry[0]() is version_root
-                        ):
-                            self._entries.move_to_end(key)
-                            # Concurrent writes after this recheck remain a
-                            # data race, as they do after a cold validation.
-                            return
-                    self._entries.pop(key)
-                    self._total_bytes -= entry[1]
-
-        idx_min, idx_max = _read_index_bounds(index)
-        assert idx_min >= 0 and idx_max < upper_bound, _INDEX_OUT_OF_BOUNDS_MESSAGE
-
-        if identity is None:
-            return
-        confirmed_identity = _index_bounds_cache_identity(index, upper_bound)
-        entry_bytes = index.numel() * index.element_size()
-        if confirmed_identity is None or entry_bytes > self._max_bytes:
-            return
-        confirmed_key, confirmed_root = confirmed_identity
-        if confirmed_key != key or confirmed_root is not version_root:
-            return
-        try:
-            version_root_ref = weakref.ref(version_root)
-        except TypeError:
-            return
-
-        with self._lock:
-            previous = self._entries.pop(key, None)
-            if previous is not None:
-                self._total_bytes -= previous[1]
-            # Cache entries retain metadata and a weak root only. max_bytes is
-            # a validated logical-footprint gate, not retained storage size.
-            self._entries[key] = (version_root_ref, entry_bytes)
-            self._total_bytes += entry_bytes
-            while (
-                len(self._entries) > self._max_entries
-                or self._total_bytes > self._max_bytes
-            ):
-                _, (_, evicted_bytes) = self._entries.popitem(last=False)
-                self._total_bytes -= evicted_bytes
-
-
-_INDEX_BOUNDS_CACHE = _IndexBoundsCache()
-
-
-def _assert_index_in_bounds(index, upper_bound, cacheable=True):
-    _INDEX_BOUNDS_CACHE.assert_in_bounds(index, upper_bound, cacheable=cacheable)
+def _assert_index_in_bounds(index, upper_bound):
+    if index.numel() == 0:
+        return
+    idx_min, idx_max = _read_index_bounds(index)
+    if idx_min < 0 or idx_max >= upper_bound:
+        raise AssertionError(_INDEX_OUT_OF_BOUNDS_MESSAGE)
 
 
 def _volume(shape):
@@ -176,30 +57,6 @@ def _volume(shape):
     for item in shape:
         value *= int(item)
     return value
-
-
-def _normalize_dim(inp, dim):
-    if dim < -inp.ndim or dim >= inp.ndim:
-        raise IndexError(
-            f"Dimension out of range (expected to be in range of "
-            f"[{-inp.ndim}, {inp.ndim - 1}], but got {dim})"
-        )
-    return dim % inp.ndim
-
-
-def _can_return_empty_index(inp, dim, index, src):
-    return (
-        inp.ndim > 0
-        and inp.ndim == src.ndim
-        and inp.dtype == src.dtype
-        and inp.device == src.device
-        and index.ndim == 1
-        and index.dtype in (torch.int32, torch.int64)
-        and index.device == inp.device
-        and index.numel() == 0
-        and src.size(dim) == 0
-        and all(inp.size(i) == src.size(i) for i in range(inp.ndim) if i != dim)
-    )
 
 
 def _can_use_contiguous_suffix_path(inp, dim, index, src):
@@ -344,9 +201,9 @@ def index_add(inp, dim, index, src, alpha=1):
     """
     logger.debug("GEMS_MTHREADS INDEX_ADD")
 
-    dim = _normalize_dim(inp, dim)
-    if _can_return_empty_index(inp, dim, index, src):
-        return inp.clone()
+    dim = _validate_index_add_args(inp, dim, index, src)
+    if src.numel() == 0:
+        return inp.clone(memory_format=torch.contiguous_format)
 
     use_contiguous_suffix_path = _can_use_contiguous_suffix_path(
         inp, dim, index, src
@@ -361,11 +218,9 @@ def index_add(inp, dim, index, src, alpha=1):
     N = index.numel()
     M = src.numel() // N
 
-    # Bounds check: the common op (src/flag_gems/ops/index_add.py) performs this
-    # inside the Triton kernel. Other backends (kunlunxin, ascend, cambricon) do
-    # it in Python instead, which we follow here.
+    # Reject invalid receivers before a pointer kernel can observe them.
     # Use min/max to avoid allocating full-size boolean tensors.
-    _assert_index_in_bounds(index, inp_len, cacheable=use_contiguous_suffix_path)
+    _assert_index_in_bounds(index, inp_len)
 
     if use_contiguous_suffix_path:
         out = inp.clone()
@@ -404,13 +259,19 @@ def index_add_(inp, dim, index, src, alpha=1):
     """
     logger.debug("GEMS_MTHREADS INDEX_ADD_")
 
-    dim = _normalize_dim(inp, dim)
-    if torch._C._is_alias_of(inp, src):
+    dim = _validate_index_add_args(inp, dim, index, src)
+    if src is inp or index is inp:
         raise RuntimeError(
-            "input and source overlap; clone source before calling index_add_"
+            "input overlaps with source or index; clone the overlapping tensor "
+            "before calling index_add_"
         )
-    if _can_return_empty_index(inp, dim, index, src):
+    if src.numel() == 0:
         return inp
+    if torch._C._is_alias_of(inp, src) or torch._C._is_alias_of(inp, index):
+        raise RuntimeError(
+            "input overlaps with source or index; clone the overlapping tensor "
+            "before calling index_add_"
+        )
 
     use_contiguous_suffix_path = _can_use_contiguous_suffix_path(
         inp, dim, index, src
@@ -424,11 +285,9 @@ def index_add_(inp, dim, index, src, alpha=1):
     N = index.numel()
     M = src.numel() // N
 
-    # Bounds check: the common op (src/flag_gems/ops/index_add.py) performs this
-    # inside the Triton kernel. Other backends (kunlunxin, ascend, cambricon) do
-    # it in Python instead, which we follow here.
+    # Reject invalid receivers before a pointer kernel can observe them.
     # Use min/max to avoid allocating full-size boolean tensors.
-    _assert_index_in_bounds(index, inp_len, cacheable=use_contiguous_suffix_path)
+    _assert_index_in_bounds(index, inp_len)
 
     if use_contiguous_suffix_path:
         return _run_contiguous_suffix_path(inp, dim, index, src, alpha)

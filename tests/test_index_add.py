@@ -46,12 +46,33 @@ def _make_repeated_index(index_len):
     return torch.arange(index_len, device=flag_gems.device) % index_range
 
 
-def _run_index_add(inp, dim, index, src, inplace, alpha=1):
+def _run_torch_index_add(inp, dim, index, src, inplace, alpha=1):
     if inplace:
         result = inp.index_add_(dim, index, src, alpha=alpha)
         assert result is inp
         return result
     return torch.index_add(inp, dim, index, src, alpha=alpha)
+
+
+def _run_flag_gems_index_add(inp, dim, index, src, inplace, alpha=1):
+    if inplace:
+        result = flag_gems.index_add_(inp, dim, index, src, alpha=alpha)
+        assert result is inp
+        return result
+    return flag_gems.index_add(inp, dim, index, src, alpha=alpha)
+
+
+def _get_active_index_add_module():
+    module = importlib.import_module(flag_gems.index_add.__module__)
+    if module.index_add is not flag_gems.index_add:
+        raise AssertionError("resolved a duplicate index_add backend module")
+    return module
+
+
+_INDEX_ADD_FIX_IS_ACTIVE = (
+    flag_gems.index_add.__module__ == "flag_gems.ops.index_add"
+    or flag_gems.vendor_name in ("metax", "mthreads")
+)
 
 
 @pytest.mark.index_add
@@ -62,15 +83,41 @@ def test_index_add_empty_index(inplace, dtype):
     inp = torch.randn((2, 7, 17), dtype=dtype, device=flag_gems.device)
     src = torch.empty((2, 0, 17), dtype=dtype, device=flag_gems.device)
     index = torch.empty((0,), dtype=torch.int64, device=flag_gems.device)
-    ref_inp = utils.to_reference(inp)
+    ref_inp = utils.to_reference(inp.clone())
 
-    with flag_gems.use_gems():
-        if inplace:
-            result = inp.index_add_(1, index, src)
-            assert result is inp
-        else:
-            result = torch.index_add(inp, 1, index, src)
+    result = _run_flag_gems_index_add(inp, 1, index, src, inplace)
 
+    if inplace:
+        assert result is inp
+    else:
+        assert result.data_ptr() != inp.data_ptr()
+        assert result.is_contiguous()
+    utils.gems_assert_equal(result, ref_inp)
+
+
+@pytest.mark.skipif(
+    not _INDEX_ADD_FIX_IS_ACTIVE,
+    reason="common/MetaX/MThreads index_add contract regression",
+)
+@pytest.mark.index_add
+@pytest.mark.index_add_
+@pytest.mark.parametrize("inplace", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_index_add_empty_index_noncontiguous_input(inplace, dtype):
+    inp = torch.randn((7, 2, 17), dtype=dtype, device=flag_gems.device).transpose(0, 1)
+    src = torch.empty((2, 0, 17), dtype=dtype, device=flag_gems.device)
+    index = torch.empty((0,), dtype=torch.int64, device=flag_gems.device)
+    ref_inp = utils.to_reference(inp.clone())
+    original_stride = inp.stride()
+
+    result = _run_flag_gems_index_add(inp, 1, index, src, inplace)
+
+    if inplace:
+        assert result is inp
+        assert result.stride() == original_stride
+    else:
+        assert result.data_ptr() != inp.data_ptr()
+        assert result.is_contiguous()
     utils.gems_assert_equal(result, ref_inp)
 
 
@@ -87,9 +134,8 @@ def test_index_add_negative_dim_contiguous_suffix(inplace):
     ref_src = utils.to_reference(src)
     ref_index = utils.to_reference(index)
 
-    ref_result = _run_index_add(ref_inp, dim, ref_index, ref_src, inplace)
-    with flag_gems.use_gems():
-        result = _run_index_add(inp, dim, index, src, inplace)
+    ref_result = _run_torch_index_add(ref_inp, dim, ref_index, ref_src, inplace)
+    result = _run_flag_gems_index_add(inp, dim, index, src, inplace)
 
     utils.gems_assert_equal(result, ref_result)
 
@@ -114,13 +160,17 @@ def test_index_add_invalid_dim(inplace, dim, src_shape, index_values):
     ref_index = utils.to_reference(index)
 
     with pytest.raises(IndexError):
-        _run_index_add(ref_inp, dim, ref_index, ref_src, inplace)
-    with flag_gems.use_gems(), pytest.raises(IndexError):
-        _run_index_add(inp, dim, index, src, inplace)
+        _run_torch_index_add(ref_inp, dim, ref_index, ref_src, inplace)
+    with pytest.raises(IndexError):
+        _run_flag_gems_index_add(inp, dim, index, src, inplace)
 
     utils.gems_assert_equal(inp, original)
 
 
+@pytest.mark.skipif(
+    not _INDEX_ADD_FIX_IS_ACTIVE,
+    reason="common/MetaX/MThreads index_add contract regression",
+)
 @pytest.mark.index_add
 @pytest.mark.index_add_
 @pytest.mark.parametrize("inplace", [False, True])
@@ -150,11 +200,16 @@ def test_index_add_noncontiguous_input_and_source(
     ref_inp = utils.to_reference(inp.clone())
     ref_src = utils.to_reference(src.clone())
     ref_index = utils.to_reference(index)
-    ref_result = _run_index_add(ref_inp, 1, ref_index, ref_src, inplace)
+    ref_result = _run_torch_index_add(ref_inp, 1, ref_index, ref_src, inplace)
+    original_stride = inp.stride()
 
-    with flag_gems.use_gems():
-        result = _run_index_add(inp, 1, index, src, inplace)
+    result = _run_flag_gems_index_add(inp, 1, index, src, inplace)
 
+    if inplace:
+        assert result is inp
+        assert inp.stride() == original_stride
+    else:
+        assert result.is_contiguous()
     utils.gems_assert_equal(result, ref_result)
 
 
@@ -172,9 +227,118 @@ def test_index_add_inplace_input_source_alias():
         ref_inp.index_add_(1, ref_index, ref_inp)
     utils.gems_assert_equal(ref_inp, original)
 
-    with flag_gems.use_gems(), pytest.raises(RuntimeError):
-        inp.index_add_(1, index, inp)
+    with pytest.raises(RuntimeError):
+        flag_gems.index_add_(inp, 1, index, inp)
     utils.gems_assert_equal(inp, original)
+
+
+@pytest.mark.skipif(
+    not _INDEX_ADD_FIX_IS_ACTIVE,
+    reason="common/MetaX/MThreads index_add contract regression",
+)
+@pytest.mark.index_add_
+def test_index_add_inplace_empty_source_alias_is_noop():
+    inp = torch.arange(
+        2 * 7 * 17, dtype=torch.float32, device=flag_gems.device
+    ).reshape(2, 7, 17)
+    src = inp[:, :0, :]
+    index = torch.empty((0,), dtype=torch.int64, device=flag_gems.device)
+    original = utils.to_reference(inp.clone())
+
+    result = flag_gems.index_add_(inp, 1, index, src)
+
+    assert result is inp
+    utils.gems_assert_equal(inp, original)
+
+
+@pytest.mark.skipif(
+    not _INDEX_ADD_FIX_IS_ACTIVE,
+    reason="common/MetaX/MThreads index_add contract regression",
+)
+@pytest.mark.index_add_
+def test_index_add_inplace_empty_exact_alias_raises():
+    inp = torch.empty((2, 0, 17), device=flag_gems.device)
+    index = torch.empty((0,), dtype=torch.int64, device=flag_gems.device)
+
+    with pytest.raises(RuntimeError, match="overlap"):
+        flag_gems.index_add_(inp, 1, index, inp)
+
+
+@pytest.mark.skipif(
+    not _INDEX_ADD_FIX_IS_ACTIVE,
+    reason="common/MetaX/MThreads index_add contract regression",
+)
+@pytest.mark.index_add
+@pytest.mark.index_add_
+@pytest.mark.parametrize("inplace", [False, True])
+def test_index_add_zero_work_skips_bounds_check(inplace):
+    inp = torch.empty((0, 3), device=flag_gems.device)
+    src = torch.empty((0, 1), device=flag_gems.device)
+    index = torch.tensor([99], dtype=torch.int64, device=flag_gems.device)
+    ref_inp = utils.to_reference(inp.clone())
+
+    result = _run_flag_gems_index_add(inp, 1, index, src, inplace)
+
+    if inplace:
+        assert result is inp
+    else:
+        assert not torch._C._is_alias_of(result, inp)
+        assert result.is_contiguous()
+    utils.gems_assert_equal(result, ref_inp)
+
+
+@pytest.mark.skipif(
+    not _INDEX_ADD_FIX_IS_ACTIVE,
+    reason="common/MetaX/MThreads index_add contract regression",
+)
+@pytest.mark.index_add
+@pytest.mark.index_add_
+@pytest.mark.parametrize("inplace", [False, True])
+def test_index_add_empty_index_still_validates_shape(inplace):
+    inp = torch.empty((2, 7, 17), device=flag_gems.device)
+    src = torch.empty((3, 0, 17), device=flag_gems.device)
+    index = torch.empty((0,), dtype=torch.int64, device=flag_gems.device)
+
+    with pytest.raises(AssertionError, match=r"src\.size\(d\).*d != dim"):
+        _run_flag_gems_index_add(inp, 1, index, src, inplace)
+
+
+@pytest.mark.skipif(
+    not _INDEX_ADD_FIX_IS_ACTIVE,
+    reason="common/MetaX/MThreads index_add contract regression",
+)
+@pytest.mark.index_add_
+def test_index_add_inplace_index_alias_raises():
+    inp = torch.arange(4, dtype=torch.int32, device=flag_gems.device)
+    index = inp[:2]
+    src = torch.ones((2,), dtype=inp.dtype, device=flag_gems.device)
+    original = utils.to_reference(inp.clone())
+
+    with pytest.raises(RuntimeError, match="overlap"):
+        flag_gems.index_add_(inp, 0, index, src)
+
+    utils.gems_assert_equal(inp, original)
+
+
+@pytest.mark.skipif(
+    not _INDEX_ADD_FIX_IS_ACTIVE,
+    reason="common/MetaX/MThreads index_add contract regression",
+)
+@pytest.mark.index_add
+@pytest.mark.index_add_
+@pytest.mark.parametrize("inplace", [False, True])
+def test_index_add_accepts_scalar_index(inplace):
+    inp = torch.zeros((2, 3), device=flag_gems.device)
+    src = torch.ones((2, 1), device=flag_gems.device)
+    index = torch.tensor(1, dtype=torch.int64, device=flag_gems.device)
+    ref_inp = utils.to_reference(inp.clone())
+    ref_src = utils.to_reference(src)
+    ref_index = utils.to_reference(index)
+    ref_result = _run_torch_index_add(ref_inp, 1, ref_index, ref_src, inplace)
+
+    result = _run_flag_gems_index_add(inp, 1, index, src, inplace)
+
+    utils.gems_assert_equal(result, ref_result)
 
 
 @pytest.mark.index_add
@@ -192,9 +356,10 @@ def test_index_add_partial_contiguous_suffix(inplace, dtype):
     ref_src = utils.to_reference(src)
     ref_index = utils.to_reference(index)
 
-    ref_result = _run_index_add(ref_inp, dim, ref_index, ref_src, inplace, alpha=2)
-    with flag_gems.use_gems():
-        result = _run_index_add(inp, dim, index, src, inplace, alpha=2)
+    ref_result = _run_torch_index_add(
+        ref_inp, dim, ref_index, ref_src, inplace, alpha=2
+    )
+    result = _run_flag_gems_index_add(inp, dim, index, src, inplace, alpha=2)
 
     utils.gems_assert_close(result, ref_result, dtype=dtype, reduce_dim=dim)
 
@@ -218,8 +383,7 @@ def test_index_add(shape, dim, dtype):
     ref_src = utils.to_reference(src)
     ref_index = utils.to_reference(index)
     ref_out = torch.index_add(ref_inp, dim, ref_index, ref_src, alpha=alpha)
-    with flag_gems.use_gems():
-        res_out = torch.index_add(inp, dim, index, src, alpha=alpha)
+    res_out = flag_gems.index_add(inp, dim, index, src, alpha=alpha)
 
     utils.gems_assert_close(res_out, ref_out, dtype=dtype, reduce_dim=dim)
 
@@ -237,8 +401,7 @@ def test_index_add_contiguous_suffix(shape, dim, dtype):
     ref_src = utils.to_reference(src)
     ref_index = utils.to_reference(index)
     ref_out = torch.index_add(ref_inp, dim, ref_index, ref_src, alpha=alpha)
-    with flag_gems.use_gems():
-        res_out = torch.index_add(inp, dim, index, src, alpha=alpha)
+    res_out = flag_gems.index_add(inp, dim, index, src, alpha=alpha)
 
     utils.gems_assert_equal(res_out, ref_out)
 
@@ -258,12 +421,11 @@ def test_index_add_(shape, dim, dtype):
     src = torch.randn(src_shape, dtype=dtype, device=flag_gems.device)
     alpha = 2
 
-    ref_inp = utils.to_reference(inp)
+    ref_inp = utils.to_reference(inp.clone())
     ref_src = utils.to_reference(src)
     ref_index = utils.to_reference(index)
     ref_inp.index_add_(dim, ref_index, ref_src, alpha=alpha)
-    with flag_gems.use_gems():
-        inp.index_add_(dim, index, src, alpha=alpha)
+    flag_gems.index_add_(inp, dim, index, src, alpha=alpha)
 
     utils.gems_assert_close(inp, ref_inp, dtype=dtype, reduce_dim=dim)
 
@@ -277,12 +439,11 @@ def test_index_add_inplace_contiguous_suffix(shape, dim, dtype):
     src = torch.ones(shape, dtype=dtype, device=flag_gems.device)
     alpha = 2
 
-    ref_inp = utils.to_reference(inp)
+    ref_inp = utils.to_reference(inp.clone())
     ref_src = utils.to_reference(src)
     ref_index = utils.to_reference(index)
     ref_inp.index_add_(dim, ref_index, ref_src, alpha=alpha)
-    with flag_gems.use_gems():
-        inp.index_add_(dim, index, src, alpha=alpha)
+    flag_gems.index_add_(inp, dim, index, src, alpha=alpha)
 
     utils.gems_assert_equal(inp, ref_inp)
 
@@ -295,7 +456,7 @@ CONTIGUOUS_SUFFIX_STRESS_CASES = [
     ((2, 8, 2048, 32), 2),  # flat path, narrow suffix
     ((2, 8, 2048, 72), 2),  # flat path, partially filled second tile
     ((2, 8, 2048, 256), 2),  # tile path, wide suffix
-    ((1024, 64), 0),  # dim == 0 always routed to flat
+    ((1024, 64), 0),  # dim == 0 always uses the flat path
 ]
 
 
@@ -321,7 +482,7 @@ def test_index_add_contiguous_suffix_randomized(shape, dim, dup_factor, inplace)
     alpha = 0.7
 
     # Native bf16-accumulate reference (what the vendor torch does).
-    ref_inp = utils.to_reference(inp)
+    ref_inp = utils.to_reference(inp.clone())
     ref_src = utils.to_reference(src)
     ref_index = utils.to_reference(index)
     if inplace:
@@ -336,8 +497,7 @@ def test_index_add_contiguous_suffix_randomized(shape, dim, dup_factor, inplace)
     exact_src = utils.to_reference(src, upcast=True)
     exact_out = torch.index_add(exact_inp, dim, ref_index, exact_src, alpha=alpha)
 
-    with flag_gems.use_gems():
-        result = _run_index_add(inp, dim, index, src, inplace, alpha=alpha)
+    result = _run_flag_gems_index_add(inp, dim, index, src, inplace, alpha=alpha)
 
     target = ref_inp if inplace else ref_out
     utils.gems_assert_close(result, exact_out, dtype=dtype, reduce_dim=1, atol=0.05)
@@ -349,18 +509,24 @@ def test_index_add_contiguous_suffix_randomized(shape, dim, dup_factor, inplace)
     flag_gems.vendor_name != "metax", reason="MetaX-specific routing policy"
 )
 @pytest.mark.parametrize(
-    "suffix_size, expected_route",
-    [(64, "flat"), (65, "flat"), (79, "flat"), (80, "tile"), (512, "tile")],
+    "dim, suffix_size, expected_route",
+    [
+        (1, 64, "flat"),
+        (1, 65, "flat"),
+        (1, 79, "flat"),
+        (1, 80, "tile"),
+        (1, 512, "tile"),
+        (0, 256, "flat"),
+    ],
 )
 def test_index_add_metax_contiguous_suffix_route(
-    monkeypatch, suffix_size, expected_route
+    monkeypatch, dim, suffix_size, expected_route
 ):
-    metax_index_add = importlib.import_module(
-        "flag_gems.runtime.backend._metax.ops.index_add"
-    )
+    metax_index_add = _get_active_index_add_module()
     selected = []
 
-    def record_flat(out, dim, index, src, alpha):
+    def record_flat(out, dim, index, src, alpha, use_fp16_config=False):
+        assert not use_fp16_config
         selected.append("flat")
         return out
 
@@ -374,13 +540,87 @@ def test_index_add_metax_contiguous_suffix_route(
     monkeypatch.setattr(
         metax_index_add, "_run_contiguous_suffix_tile_path", record_tile
     )
-    out = torch.empty((1, 2, suffix_size), dtype=torch.float32, device=flag_gems.device)
-    src = torch.empty((1, 1, suffix_size), dtype=torch.float32, device=flag_gems.device)
+    if dim == 0:
+        inp = torch.empty(
+            (2, suffix_size), dtype=torch.float32, device=flag_gems.device
+        )
+        src = torch.empty(
+            (1, suffix_size), dtype=torch.float32, device=flag_gems.device
+        )
+    else:
+        inp = torch.empty(
+            (1, 2, suffix_size), dtype=torch.float32, device=flag_gems.device
+        )
+        src = torch.empty(
+            (1, 1, suffix_size), dtype=torch.float32, device=flag_gems.device
+        )
     index = torch.zeros((1,), dtype=torch.int64, device=flag_gems.device)
 
-    metax_index_add._run_contiguous_suffix_path(out, 1, index, src, 1.0)
+    flag_gems.index_add(inp, dim, index, src)
 
     assert selected == [expected_route]
+
+
+@pytest.mark.index_add
+@pytest.mark.skipif(
+    flag_gems.vendor_name != "metax", reason="MetaX-specific FP16 flat config"
+)
+def test_index_add_metax_fp16_flat_uses_safe_config(monkeypatch):
+    metax_index_add = _get_active_index_add_module()
+    configs = metax_index_add.runtime.get_tuned_config(
+        "index_add_contiguous_suffix_fp16_flat"
+    )
+    assert [config.kwargs["BLOCK_SIZE"] for config in configs] == [128]
+
+    launches = []
+
+    class KernelSpy:
+        def __getitem__(self, grid):
+            assert grid({"BLOCK_SIZE": 128}) == (8192,)
+
+            def launch(*args, **kwargs):
+                launches.append((args, kwargs))
+
+            return launch
+
+    class ForbiddenKernel:
+        def __init__(self, name):
+            self.name = name
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                pytest.fail(f"unexpected {self.name} kernel")
+
+            return launch
+
+    monkeypatch.setattr(
+        metax_index_add,
+        "_index_add_contiguous_suffix_fp16_flat_kernel",
+        KernelSpy(),
+    )
+    monkeypatch.setattr(
+        metax_index_add,
+        "_index_add_contiguous_suffix_flat_kernel",
+        ForbiddenKernel("generic flat"),
+    )
+    monkeypatch.setattr(
+        metax_index_add,
+        "_index_add_contiguous_suffix_tile_kernel",
+        ForbiddenKernel("tile"),
+    )
+
+    inp = torch.zeros((4096, 256), dtype=torch.float16, device=flag_gems.device)
+    src = torch.zeros_like(inp)
+    index = torch.arange(4096, dtype=torch.int64, device=flag_gems.device)
+    ref_inp = utils.to_reference(inp.clone())
+
+    result = flag_gems.index_add(inp, 0, index, src)
+
+    assert len(launches) == 1
+    args, kwargs = launches[0]
+    assert args[3:7] == (4096 * 256, 4096, 4096, 256)
+    assert "ACCUMULATE_FP32" not in kwargs
+    utils.gems_assert_equal(result, ref_inp)
 
 
 @pytest.mark.index_add
@@ -392,16 +632,10 @@ def test_index_add_invalid_index(inplace):
     inp = torch.zeros(shape, device=flag_gems.device)
     src = torch.ones((2, 2, 8), device=flag_gems.device)
     index = torch.tensor([0, shape[dim]], device=flag_gems.device)
-    ref_inp = utils.to_reference(inp)
+    ref_inp = utils.to_reference(inp.clone())
 
-    with (
-        flag_gems.use_gems(),
-        pytest.raises(AssertionError, match=r"0 <= index < self\.size\(dim\)"),
-    ):
-        if inplace:
-            inp.index_add_(dim, index, src)
-        else:
-            torch.index_add(inp, dim, index, src)
+    with pytest.raises(AssertionError, match=r"0 <= index < self\.size\(dim\)"):
+        _run_flag_gems_index_add(inp, dim, index, src, inplace)
 
     utils.gems_assert_equal(inp, ref_inp)
 
@@ -428,10 +662,9 @@ def test_index_add_lazy_negative_index(inplace, index_dtype):
     ref_inp = utils.to_reference(inp.clone())
     ref_src = utils.to_reference(src)
     ref_index = torch.tensor([1, 0], dtype=index_dtype, device=ref_inp.device)
-    ref_result = _run_index_add(ref_inp, dim, ref_index, ref_src, inplace)
+    ref_result = _run_torch_index_add(ref_inp, dim, ref_index, ref_src, inplace)
 
-    with flag_gems.use_gems():
-        result = _run_index_add(inp, dim, index, src, inplace)
+    result = _run_flag_gems_index_add(inp, dim, index, src, inplace)
 
     utils.gems_assert_equal(result, ref_result)
 
@@ -463,10 +696,9 @@ def test_index_add_lazy_negative_index_fallback(inplace, index_dtype):
     ref_inp = utils.to_reference(inp.clone())
     ref_src = utils.to_reference(src)
     ref_index = torch.tensor([1, 0], dtype=index_dtype, device=ref_inp.device)
-    ref_result = _run_index_add(ref_inp, dim, ref_index, ref_src, inplace)
+    ref_result = _run_torch_index_add(ref_inp, dim, ref_index, ref_src, inplace)
 
-    with flag_gems.use_gems():
-        result = _run_index_add(inp, dim, index, src, inplace)
+    result = _run_flag_gems_index_add(inp, dim, index, src, inplace)
 
     utils.gems_assert_equal(result, ref_result)
 
@@ -497,32 +729,42 @@ def test_index_add_lazy_negative_oob_does_not_write_input(
     index = torch._neg_view(raw_index)
     original = utils.to_reference(inp.clone())
 
-    with (
-        flag_gems.use_gems(),
-        pytest.raises(AssertionError, match=r"0 <= index < self\.size\(dim\)"),
-    ):
-        _run_index_add(inp, dim, index, src, inplace)
+    with pytest.raises(AssertionError, match=r"0 <= index < self\.size\(dim\)"):
+        _run_flag_gems_index_add(inp, dim, index, src, inplace)
 
     utils.gems_assert_equal(inp, original)
 
 
+@pytest.mark.index_add
 @pytest.mark.index_add_
-def test_index_add_inplace_revalidates_cached_index_after_mutation():
+@pytest.mark.skipif(
+    flag_gems.vendor_name not in ("metax", "mthreads"),
+    reason="vendor fast paths formerly cached index bounds",
+)
+@pytest.mark.parametrize("inplace", [False, True])
+def test_index_add_revalidates_index_after_data_mutation(monkeypatch, inplace):
     shape = (2, 4, 8)
     dim = 1
     inp = torch.zeros(shape, device=flag_gems.device)
     src = torch.ones((2, 2, 8), device=flag_gems.device)
     index = torch.tensor([0, 1], device=flag_gems.device)
 
-    with flag_gems.use_gems():
-        inp.index_add_(dim, index, src)
+    _run_flag_gems_index_add(inp, dim, index, src, inplace)
     before_invalid_call = utils.to_reference(inp.clone())
-    index[-1] = shape[dim]
 
-    with (
-        flag_gems.use_gems(),
-        pytest.raises(AssertionError, match=r"0 <= index < self\.size\(dim\)"),
-    ):
-        inp.index_add_(dim, index, src)
+    version = index._version
+    index.data[-1] = shape[dim]
+    assert index._version == version
+
+    vendor_index_add = _get_active_index_add_module()
+
+    def fail_if_kernel_is_reached(*args, **kwargs):
+        pytest.fail("kernel reached before mutated index was revalidated")
+
+    monkeypatch.setattr(
+        vendor_index_add, "_run_contiguous_suffix_path", fail_if_kernel_is_reached
+    )
+    with pytest.raises(AssertionError, match=r"0 <= index < self\.size\(dim\)"):
+        _run_flag_gems_index_add(inp, dim, index, src, inplace)
 
     utils.gems_assert_equal(inp, before_invalid_call)

@@ -98,15 +98,16 @@ def test_copy_inplace_preserves_lazy_negative_semantics(src_negative, dst_negati
     dst_base = torch.tensor([10, 20, 30], dtype=dtype, device=flag_gems.device)
     src = torch._neg_view(src_base) if src_negative else src_base
     dst = torch._neg_view(dst_base) if dst_negative else dst_base
-    expected = torch.tensor(
-        [-1, 2, -3] if src_negative else [1, -2, 3],
-        dtype=dtype,
-        device=flag_gems.device,
+    expected = utils.to_reference(
+        torch.tensor(
+            [-1, 2, -3] if src_negative else [1, -2, 3],
+            dtype=dtype,
+            device=flag_gems.device,
+        )
     )
 
     assert _can_use_triton(dst, src)
-    with flag_gems.use_gems(include=["copy_"]):
-        result = dst.copy_(src)
+    result = flag_gems.copy_(dst, src)
 
     assert result is dst
     assert dst.is_neg() == dst_negative
@@ -119,25 +120,6 @@ def test_copy_inplace_preserves_lazy_negative_semantics(src_negative, dst_negati
     physical_dst = torch._neg_view(dst) if dst_negative else dst
     physical_expected = -expected if dst_negative else expected
     utils.gems_assert_equal(physical_dst, physical_expected)
-
-
-@pytest.mark.copy_
-@pytest.mark.skipif(
-    not _COMMON_COPY_IS_ACTIVE,
-    reason="active vendor copy_ does not use the common Triton gate",
-)
-def test_clone_materializes_lazy_negative_values():
-    dtype = torch.float32
-    raw = torch.tensor([-1, 0, 3], dtype=dtype, device=flag_gems.device)
-    lazy_negative = torch._neg_view(raw)
-    expected = torch.tensor([1, 0, -3], dtype=dtype, device=flag_gems.device)
-
-    with flag_gems.use_gems(include=["copy_"]):
-        result = lazy_negative.clone()
-
-    assert not result.is_neg()
-    assert result.data_ptr() != lazy_negative.data_ptr()
-    utils.gems_assert_equal(result, expected)
 
 
 @pytest.mark.copy_

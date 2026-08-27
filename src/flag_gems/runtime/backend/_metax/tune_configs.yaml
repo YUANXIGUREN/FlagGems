@@ -1452,6 +1452,10 @@ index_add_contiguous_suffix_flat:
 - META:
     BLOCK_SIZE: 512
 
+index_add_contiguous_suffix_fp16_flat:
+- META:
+    BLOCK_SIZE: 128
+
 index_add_contiguous_suffix_tile:
 - META:
     BLOCK_M: 2
