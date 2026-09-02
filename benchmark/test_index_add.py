@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+from contextlib import nullcontext
 from functools import partial
 
 import pytest
@@ -110,9 +112,16 @@ def index_add__input_fn(case, dtype, device):
 
 CONTIGUOUS_SUFFIX_CONTENTION_CASES = [
     ((2, 8, 2048, 512), 2),  # wide contiguous suffix, tile path
+    # N=4096 with suffixes around the crossover exercise both sides of the
+    # large FP32 native redispatch; FP16/BF16 retain the custom atomic path.
+    ((1, 8192, 127), 1),
+    ((1, 8192, 128), 1),
+    ((1, 8192, 256), 1),
+    # Model-independent boundary case for the exact-three sorted-run path.
+    ((1, 131076, 512), 1),
     ((1024, 64), 0),  # dim-0 flat path
 ]
-CONTENTION_DUP_FACTORS = [2, 8, 32, 128]
+CONTENTION_DUP_FACTORS = [2, 3, 8, 32, 128]
 
 
 class IndexAddContentionBenchmark(TensorSelectBenchmark):
@@ -127,12 +136,29 @@ def index_add_contention_input_fn(case, dtype, device, dup_factor):
     inp = torch.randn(shape, dtype=dtype, device=device)
     index_max = shape[dim]
     index_len = index_max // 2 if index_max >= 2 else 1
-    receiver_range = max(index_len // dup_factor, 1)
-    index = torch.arange(index_len, device=device) % receiver_range
+    if dim == 1 and shape[0] == 1:
+        # Sorted receiver lists group repeated destinations adjacently.
+        # Keep the exact-three case above the MThreads 4096-edge crossover
+        # while making the complete synthetic root a whole number of triples.
+        if dup_factor == 3:
+            index_len += (-index_len) % 3
+        index = torch.arange(index_len, device=device) // dup_factor
+    else:
+        # Preserve the historical interleaved contention distribution.
+        receiver_range = max(index_len // dup_factor, 1)
+        index = torch.arange(index_len, device=device) % receiver_range
     src_shape = list(shape)
     src_shape[dim] = index_len
     src = torch.randn(src_shape, dtype=dtype, device=device)
     yield inp, dim, index, src
+
+
+def index_add_trusted_inference_context():
+    if flag_gems.vendor_name != "mthreads":
+        return nullcontext()
+    module = importlib.import_module(flag_gems.index_add.__module__)
+    factory = getattr(module, "use_trusted_index_add_inference", None)
+    return factory() if factory is not None else nullcontext()
 
 
 @pytest.mark.parametrize(
@@ -152,7 +178,7 @@ def index_add_contention_input_fn(case, dtype, device, dup_factor):
 def test_index_add_contention(op_name, torch_op):
     # The default input_fn draws a permutation, so atomics never contend.
     # Sweep receiver reuse factors to cover increasingly contended atomics.
-    # Rows for one shape repeat in dup-factor order 2, 8, 32, 128.
+    # Rows for one shape repeat in dup-factor order 2, 3, 8, 32, 128.
     for dup_factor in CONTENTION_DUP_FACTORS:
         print(
             f"\n=== {op_name} contention tier: " f"receivers repeat ~{dup_factor}x ==="
@@ -164,7 +190,8 @@ def test_index_add_contention(op_name, torch_op):
             dtypes=[torch.float16, torch.bfloat16, torch.float32],
             get_gbps=index_add_gbps,
         )
-        bench.run()
+        with torch.no_grad(), index_add_trusted_inference_context():
+            bench.run()
 
 
 @pytest.mark.index_add_

@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import logging
+import weakref
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import torch
 import triton
@@ -27,10 +30,162 @@ from flag_gems.utils import triton_lang_extension as ext
 logger = logging.getLogger(__name__)
 
 _INDEX_OUT_OF_BOUNDS_MESSAGE = "0 <= index < self.size(dim)"
+_NATIVE_INDEX_MIN_ELEMENTS = 4096
+_NATIVE_SUFFIX_MIN_ELEMENTS = 128
+_SORTED_RUN_INDEX_MIN_ELEMENTS = 65536
+_NATIVE_FALLBACK_KEYSET = torch._C.DispatchKeySet(
+    torch._C.DispatchKey.CompositeExplicitAutograd
+)
+_TRUSTED_INDEX_ROOTS = ContextVar(
+    "mthreads_trusted_index_add_roots",
+    default=None,
+)
+
+
+def _evict_dead_trusted_index_root(roots, root_id, dead_ref):
+    entry = roots.get(root_id)
+    if entry is not None and entry.root_ref is dead_ref:
+        roots.pop(root_id, None)
+
+
+class _TrustedIndexRoot:
+    __slots__ = (
+        "root_ref",
+        "storage_ptr",
+        "start",
+        "end",
+        "dtype",
+        "device",
+        "upper_bound",
+        "version",
+        "uniform_run_length",
+    )
+
+    def __init__(
+        self,
+        root,
+        upper_bound,
+        version,
+        uniform_run_length,
+        roots,
+        root_id,
+    ):
+        self.root_ref = weakref.ref(
+            root,
+            lambda dead_ref: _evict_dead_trusted_index_root(
+                roots, root_id, dead_ref
+            ),
+        )
+        self.storage_ptr = root.untyped_storage().data_ptr()
+        self.start = root.storage_offset()
+        self.end = self.start + root.numel()
+        self.dtype = root.dtype
+        self.device = root.device
+        self.upper_bound = upper_bound
+        self.version = version
+        self.uniform_run_length = uniform_run_length
+
+
+@contextmanager
+def use_trusted_index_add_inference():
+    """Validate immutable index roots once inside an inference scope.
+
+    The caller promises that roots are not changed through ``.data``, storage
+    aliases, DMA, or external writers while this context is active. Ordinary
+    tracked PyTorch mutations invalidate the entry and restore per-call bounds
+    validation.
+    """
+
+    token = _TRUSTED_INDEX_ROOTS.set({})
+    try:
+        yield
+    finally:
+        _TRUSTED_INDEX_ROOTS.reset(token)
 
 
 def _read_index_bounds(index):
     return index.min().item(), index.max().item()
+
+
+@libentry()
+@triton.jit
+def _index_bounds_kernel(
+    index,
+    invalid,
+    index_len,
+    upper_bound,
+    index_stride,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = ext.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < index_len
+    values = tl.load(index + offsets * index_stride, mask=mask, other=0)
+    out_of_bounds = mask & ((values < 0) | (values >= upper_bound))
+    invalid_ptrs = invalid + tl.zeros((BLOCK_SIZE,), tl.int32)
+    ones = tl.full((BLOCK_SIZE,), 1, tl.int32)
+    tl.atomic_xchg(invalid_ptrs, ones, mask=out_of_bounds)
+
+
+def _native_index_is_in_bounds(index, upper_bound):
+    logical_index = _resolve_index_for_kernel(index)
+    invalid = torch.zeros((), dtype=torch.int32, device=index.device)
+    grid = (triton.cdiv(logical_index.numel(), 1024),)
+    with torch_device_fn.device(index.device):
+        _index_bounds_kernel[grid](
+            logical_index,
+            invalid,
+            logical_index.numel(),
+            upper_bound,
+            logical_index.stride(0),
+            BLOCK_SIZE=1024,
+        )
+    return invalid.item() == 0
+
+
+@libentry()
+@triton.jit
+def _index_uniform_run_length_three_kernel(
+    index,
+    invalid,
+    index_len,
+    index_stride,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = ext.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < index_len
+    values = tl.load(index + offsets * index_stride, mask=mask, other=0)
+    previous_offsets = tl.maximum(offsets - 1, 0)
+    previous = tl.load(
+        index + previous_offsets * index_stride,
+        mask=mask,
+        other=0,
+    )
+    position = offsets % 3
+    unequal_inside_run = (position != 0) & (values != previous)
+    unordered_run_start = (
+        (position == 0) & (offsets > 0) & (values <= previous)
+    )
+    invalid_pattern = mask & (unequal_inside_run | unordered_run_start)
+    invalid_ptrs = invalid + tl.zeros((BLOCK_SIZE,), tl.int32)
+    ones = tl.full((BLOCK_SIZE,), 1, tl.int32)
+    tl.atomic_xchg(invalid_ptrs, ones, mask=invalid_pattern)
+
+
+def _native_index_uniform_run_length(index):
+    if index.numel() == 0 or index.numel() % 3 != 0:
+        return None
+
+    invalid = torch.zeros((), dtype=torch.int32, device=index.device)
+    grid = (triton.cdiv(index.numel(), 1024),)
+    with torch_device_fn.device(index.device):
+        _index_uniform_run_length_three_kernel[grid](
+            index,
+            invalid,
+            index.numel(),
+            index.stride(0),
+            BLOCK_SIZE=1024,
+        )
+    return 3 if invalid.item() == 0 else None
 
 
 def _resolve_index_for_kernel(index):
@@ -50,6 +205,124 @@ def _assert_index_in_bounds(index, upper_bound):
     idx_min, idx_max = _read_index_bounds(index)
     if idx_min < 0 or idx_max >= upper_bound:
         raise AssertionError(_INDEX_OUT_OF_BOUNDS_MESSAGE)
+
+
+def _assert_native_index_in_bounds(index, upper_bound):
+    if not _native_index_is_in_bounds(index, upper_bound):
+        raise AssertionError(_INDEX_OUT_OF_BOUNDS_MESSAGE)
+
+
+def _tensor_version(tensor):
+    try:
+        return tensor._version
+    except RuntimeError:
+        return None
+
+
+def _resolve_trusted_index_root(index):
+    if (
+        index.is_neg()
+        or index.ndim != 1
+        or index.dtype not in (torch.int32, torch.int64)
+        or not index.is_contiguous()
+    ):
+        return None
+
+    root = index
+    visited = set()
+    while root._base is not None:
+        root_id = id(root)
+        if root_id in visited:
+            return None
+        visited.add(root_id)
+        root = root._base
+
+    if (
+        root.ndim != 1
+        or root.dtype != index.dtype
+        or root.device != index.device
+        or not root.is_contiguous()
+    ):
+        return None
+    return root
+
+
+def _trusted_view_matches_entry(index, root, entry, upper_bound, version):
+    if (
+        entry.root_ref() is not root
+        or entry.upper_bound != upper_bound
+        or entry.version != version
+        or entry.dtype != index.dtype
+        or entry.device != index.device
+        or entry.storage_ptr != index.untyped_storage().data_ptr()
+    ):
+        return False
+
+    start = index.storage_offset()
+    end = start + index.numel()
+    return entry.start <= start and end <= entry.end
+
+
+def _trusted_index_entry(index, upper_bound):
+    roots = _TRUSTED_INDEX_ROOTS.get()
+    if roots is None or torch.is_grad_enabled():
+        return None
+
+    root = _resolve_trusted_index_root(index)
+    if root is None:
+        return None
+
+    version = _tensor_version(root)
+    if version is None:
+        return None
+
+    root_id = id(root)
+    entry = roots.get(root_id)
+    if entry is not None:
+        if entry.root_ref() is root:
+            if _trusted_view_matches_entry(
+                index, root, entry, upper_bound, version
+            ):
+                return entry
+            return None
+        roots.pop(root_id, None)
+
+    if not _native_index_is_in_bounds(root, upper_bound):
+        raise AssertionError(_INDEX_OUT_OF_BOUNDS_MESSAGE)
+
+    validated_version = _tensor_version(root)
+    if validated_version is None or validated_version != version:
+        return None
+
+    uniform_run_length = None
+    if root.numel() >= _SORTED_RUN_INDEX_MIN_ELEMENTS:
+        uniform_run_length = _native_index_uniform_run_length(root)
+    metadata_version = _tensor_version(root)
+    if metadata_version is None or metadata_version != validated_version:
+        return None
+
+    entry = _TrustedIndexRoot(
+        root,
+        upper_bound,
+        metadata_version,
+        uniform_run_length,
+        roots,
+        root_id,
+    )
+    roots[root_id] = entry
+    if not _trusted_view_matches_entry(
+        index,
+        root,
+        entry,
+        upper_bound,
+        metadata_version,
+    ):
+        return None
+    return entry
+
+
+def _trusted_index_can_skip_bounds(index, upper_bound):
+    return _trusted_index_entry(index, upper_bound) is not None
 
 
 def _volume(shape):
@@ -73,6 +346,44 @@ def _can_use_contiguous_suffix_path(inp, dim, index, src):
         and src.is_contiguous()
         and all(inp.size(i) == src.size(i) for i in range(inp.ndim) if i != dim)
         and _volume(src.shape[dim + 1 :]) > 1
+    )
+
+
+def _should_redispatch_native(inp, dim, index, src):
+    # Native MUSA is faster once both the scatter length and contiguous suffix
+    # are large; smaller or non-FP32 inputs keep using the custom kernels.
+    return (
+        _can_use_contiguous_suffix_path(inp, dim, index, src)
+        and inp.dtype == torch.float32
+        and not (
+            torch.is_grad_enabled() and (inp.requires_grad or src.requires_grad)
+        )
+        and index.numel() >= _NATIVE_INDEX_MIN_ELEMENTS
+        and _volume(src.shape[dim + 1 :]) >= _NATIVE_SUFFIX_MIN_ELEMENTS
+        and not torch._C._is_alias_of(inp, src)
+        and not torch._C._is_alias_of(inp, index)
+    )
+
+
+def _native_index_add(inp, dim, index, src, alpha):
+    return torch.ops.aten.index_add.default.redispatch(
+        _NATIVE_FALLBACK_KEYSET,
+        inp,
+        dim,
+        index,
+        src,
+        alpha=alpha,
+    )
+
+
+def _native_index_add_(inp, dim, index, src, alpha):
+    return torch.ops.aten.index_add_.default.redispatch(
+        _NATIVE_FALLBACK_KEYSET,
+        inp,
+        dim,
+        index,
+        src,
+        alpha=alpha,
     )
 
 
@@ -188,6 +499,99 @@ def _run_contiguous_suffix_path(out, dim, index, src, alpha):
     return out
 
 
+@libentry()
+@triton.jit
+def _index_add_sorted_run_kernel(
+    out,
+    index,
+    src,
+    index_len,
+    run_count,
+    out_dim,
+    suffix_size,
+    first_run_size,
+    alpha,
+    BLOCK_N: tl.constexpr,
+):
+    linear_run = ext.program_id(0)
+    prefix = linear_run // run_count
+    run = linear_run % run_count
+    cols = ext.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    edge = tl.where(
+        run == 0,
+        0,
+        first_run_size + (run - 1) * 3,
+    )
+    current_run_size = tl.where(run == 0, first_run_size, 3)
+    valid_run = edge < index_len
+    receiver = tl.load(index + edge, mask=valid_run, other=0).to(tl.int64)
+    col_mask = cols < suffix_size
+
+    values = tl.zeros((BLOCK_N,), tl.float32)
+    for run_offset in tl.static_range(0, 3):
+        source_edge = edge + run_offset
+        source_mask = (
+            valid_run
+            & (run_offset < current_run_size)
+            & (source_edge < index_len)
+            & col_mask
+        )
+        source_offsets = (
+            (
+                prefix.to(tl.int64) * index_len
+                + source_edge.to(tl.int64)
+            )
+            * suffix_size
+            + cols
+        )
+        values += tl.load(
+            src + source_offsets,
+            mask=source_mask,
+            other=0.0,
+        ).to(tl.float32)
+
+    out_offsets = (prefix * out_dim + receiver) * suffix_size + cols
+    mask = valid_run & col_mask
+    previous = tl.load(out + out_offsets, mask=mask, other=0.0)
+    tl.store(out + out_offsets, previous + values * alpha, mask=mask)
+
+
+def _should_use_sorted_run_path(entry, index):
+    return (
+        entry is not None
+        and entry.uniform_run_length == 3
+        and index.numel() >= _SORTED_RUN_INDEX_MIN_ELEMENTS
+    )
+
+
+def _run_sorted_run_path(out, dim, index, src, alpha, entry):
+    suffix_size = _volume(src.shape[dim + 1 :])
+    prefix_count = _volume(src.shape[:dim])
+    view_alignment = (index.storage_offset() - entry.start) % 3
+    first_run_size = 3 - view_alignment if view_alignment else 3
+    run_count = triton.cdiv(index.numel() + view_alignment, 3)
+    block_n = min(512, triton.next_power_of_2(suffix_size))
+    grid = (
+        prefix_count * run_count,
+        triton.cdiv(suffix_size, block_n),
+    )
+    with torch_device_fn.device(out.device):
+        _index_add_sorted_run_kernel[grid](
+            out,
+            index,
+            src,
+            index.numel(),
+            run_count,
+            out.size(dim),
+            suffix_size,
+            first_run_size,
+            alpha,
+            BLOCK_N=block_n,
+        )
+    return out
+
+
 def index_add(inp, dim, index, src, alpha=1):
     """
     Optimized index_add for mthreads backend.
@@ -204,6 +608,16 @@ def index_add(inp, dim, index, src, alpha=1):
     dim = _validate_index_add_args(inp, dim, index, src)
     if src.numel() == 0:
         return inp.clone(memory_format=torch.contiguous_format)
+    if _should_redispatch_native(inp, dim, index, src):
+        trusted_entry = _trusted_index_entry(index, inp.size(dim))
+        if trusted_entry is None:
+            _assert_native_index_in_bounds(index, inp.size(dim))
+        if _should_use_sorted_run_path(trusted_entry, index):
+            out = inp.clone(memory_format=torch.contiguous_format)
+            return _run_sorted_run_path(
+                out, dim, index, src, alpha, trusted_entry
+            )
+        return _native_index_add(inp, dim, index, src, alpha)
 
     use_contiguous_suffix_path = _can_use_contiguous_suffix_path(
         inp, dim, index, src
@@ -272,6 +686,15 @@ def index_add_(inp, dim, index, src, alpha=1):
             "input overlaps with source or index; clone the overlapping tensor "
             "before calling index_add_"
         )
+    if _should_redispatch_native(inp, dim, index, src):
+        trusted_entry = _trusted_index_entry(index, inp.size(dim))
+        if trusted_entry is None:
+            _assert_native_index_in_bounds(index, inp.size(dim))
+        if _should_use_sorted_run_path(trusted_entry, index):
+            return _run_sorted_run_path(
+                inp, dim, index, src, alpha, trusted_entry
+            )
+        return _native_index_add_(inp, dim, index, src, alpha)
 
     use_contiguous_suffix_path = _can_use_contiguous_suffix_path(
         inp, dim, index, src
