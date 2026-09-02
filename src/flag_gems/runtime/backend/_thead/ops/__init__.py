@@ -14,6 +14,7 @@
 
 
 from .adaptive_max_pool3d_backward import adaptive_max_pool3d_backward
+from .addmm import addmm, addmm_dtype, addmm_dtype_out, addmm_out
 from .addmm_ import addmm_
 from .broadcast_tensors import broadcast_tensors
 from .broadcast_to import broadcast_to
@@ -56,6 +57,10 @@ from .unbind_copy import unbind_copy
 
 __all__ = [
     "adaptive_max_pool3d_backward",
+    "addmm",
+    "addmm_dtype",
+    "addmm_dtype_out",
+    "addmm_out",
     "addmm_",
     "broadcast_tensors",
     "broadcast_to",

@@ -27,6 +27,24 @@ from flag_gems.utils import triton_lang_extension as ext
 logger = logging.getLogger(__name__)
 
 
+def _load_native_addmm_kernels():
+    """Save vendor kernels before FlagGems replaces PrivateUse1 dispatch."""
+    try:
+        default_kernel = torch.library.get_kernel("aten::addmm", "PrivateUse1")
+        out_kernel = torch.library.get_kernel("aten::addmm.out", "PrivateUse1")
+        keyset = torch._C.DispatchKeySet(torch._C.DispatchKey.PrivateUse1)
+        return default_kernel, out_kernel, keyset
+    except (AttributeError, RuntimeError):
+        return None, None, None
+
+
+(
+    _NATIVE_ADDMM_KERNEL,
+    _NATIVE_ADDMM_OUT_KERNEL,
+    _NATIVE_ADDMM_KEYSET,
+) = _load_native_addmm_kernels()
+
+
 EXPAND_CONFIG_FILENAME = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "addmm_mthreads_expand.yaml")
 )
@@ -51,6 +69,30 @@ def is_sqmma_compatible(a, b, N, K):
         and K > 0
         and N % 8 == 0
         and K % 8 == 0
+    )
+
+
+def _can_use_native_fp32_addmm(bias, mat1, mat2):
+    """Select the faster vendor GEMM for inference FP32 vector-bias cases."""
+    if _NATIVE_ADDMM_KERNEL is None:
+        return False
+    if torch.is_grad_enabled() and (
+        bias.requires_grad or mat1.requires_grad or mat2.requires_grad
+    ):
+        return False
+    if bias.dtype != torch.float32 or mat1.dtype != torch.float32:
+        return False
+    if mat2.dtype != torch.float32 or mat1.dim() != 2 or mat2.dim() != 2:
+        return False
+    _, K = mat1.shape
+    if mat2.shape[0] != K:
+        return False
+    N = mat2.shape[1]
+    return (
+        bias.dim() == 1
+        and bias.shape[0] == N
+        and bias.device == mat1.device
+        and mat2.device == mat1.device
     )
 
 
@@ -113,6 +155,7 @@ def addmm_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
+    GROUP_M: tl.constexpr = 1,
     IS_FP64: tl.constexpr = False,
 ):
     pid_m = ext.program_id(0)
@@ -141,6 +184,121 @@ def addmm_kernel(
         if IS_FP64:
             a = a.to(tl.float32)
             b = b.to(tl.float32)
+        accumulator += tl.dot(a, b, allow_tf32=False)
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    if BIAS_IS_VECTOR:
+        bias = tl.load(
+            i_ptr + stride_in * offs_cn,
+            mask=offs_cn < N,
+            other=0.0,
+        )[None, :]
+    elif BIAS_IS_SCALAR:
+        bias = tl.load(i_ptr)
+    else:
+        i_ptrs = i_ptr + stride_im * offs_cm[:, None] + stride_in * offs_cn[None, :]
+        bias = tl.load(i_ptrs, mask=c_mask, other=0.0)
+
+    accumulator = accumulator * alpha + bias * beta
+    c = accumulator.to(c_ptr.dtype.element_ty)
+    tl.store(c_ptrs, c, mask=c_mask)
+
+
+# Keep the established tuner above unchanged for non-FP32 dtypes. The two
+# additional configurations below were measured specifically on S5000 FP32;
+# isolating them avoids extra autotuning and cache invalidation for other dtypes.
+@libentry()
+@libtuner(
+    configs=[
+        triton.Config(
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 16},
+            num_stages=1,
+            num_warps=8,
+        ),
+        triton.Config(
+            {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 16},
+            num_stages=1,
+            num_warps=16,
+        ),
+        triton.Config(
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
+            num_stages=1,
+            num_warps=4,
+        ),
+        triton.Config(
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 16},
+            num_stages=1,
+            num_warps=8,
+        ),
+        triton.Config(
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 16},
+            num_stages=1,
+            num_warps=16,
+        ),
+    ],
+    key=["M", "N", "K"],
+    warmup=5,
+    rep=5,
+)
+@triton.jit(do_not_specialize=["alpha", "beta"])
+def addmm_fp32_kernel(
+    a_ptr,
+    b_ptr,
+    i_ptr,
+    c_ptr,
+    alpha,
+    beta,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_im,
+    stride_in,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BIAS_IS_VECTOR: tl.constexpr,
+    BIAS_IS_SCALAR: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    IS_FP64: tl.constexpr = False,
+):
+    pid = ext.program_id(0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        a = tl.load(
+            a_ptrs,
+            mask=(offs_m[:, None] < M) & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+            other=0.0,
+        )
+        b = tl.load(
+            b_ptrs,
+            mask=(offs_k[:, None] < K - k * BLOCK_SIZE_K) & (offs_n[None, :] < N),
+            other=0.0,
+        )
         accumulator += tl.dot(a, b, allow_tf32=False)
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -201,12 +359,19 @@ def addmm_fma(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
         bias_stride_m = bias.stride(0)
         bias_stride_n = bias.stride(1)
 
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_SIZE_M"]),
-        triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    )
+    fma_kernel = addmm_fp32_kernel if mat1.dtype == torch.float32 else addmm_kernel
+    if mat1.dtype == torch.float32:
+        grid = lambda META: (
+            triton.cdiv(M, META["BLOCK_SIZE_M"])
+            * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        )
+    else:
+        grid = lambda META: (
+            triton.cdiv(M, META["BLOCK_SIZE_M"]),
+            triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        )
     with torch_device_fn.device(mat1.device):
-        addmm_kernel[grid](
+        fma_kernel[grid](
             mat1,
             mat2,
             bias,
@@ -226,6 +391,7 @@ def addmm_fma(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
             out.stride(1),
             BIAS_IS_VECTOR=bias_is_vector,
             BIAS_IS_SCALAR=bias_is_scalar,
+            GROUP_M=8,
             IS_FP64=mat1.dtype == torch.float64,
         )
     return out
@@ -402,11 +568,37 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
 
 def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
     logger.debug("GEMS_MTHREADS ADDMM")
+    if _can_use_native_fp32_addmm(bias, mat1, mat2):
+        return _NATIVE_ADDMM_KERNEL.call_boxed(
+            _NATIVE_ADDMM_KEYSET,
+            bias,
+            mat1,
+            mat2,
+            beta=beta,
+            alpha=alpha,
+        )
     return _addmm_impl(bias, mat1, mat2, None, beta, alpha)
 
 
 def addmm_out(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
     logger.debug("GEMS_MTHREADS ADDMM_OUT")
+    if (
+        _NATIVE_ADDMM_OUT_KERNEL is not None
+        and out is not None
+        and not out.requires_grad
+        and out.dtype == torch.float32
+        and out.device == mat1.device
+        and _can_use_native_fp32_addmm(bias, mat1, mat2)
+    ):
+        return _NATIVE_ADDMM_OUT_KERNEL.call_boxed(
+            _NATIVE_ADDMM_KEYSET,
+            bias,
+            mat1,
+            mat2,
+            beta=beta,
+            alpha=alpha,
+            out=out,
+        )
     return _addmm_impl(bias, mat1, mat2, out, beta, alpha)
 
 

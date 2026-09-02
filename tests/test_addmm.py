@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+
 import pytest
 import torch
 from packaging import version
@@ -39,6 +41,7 @@ else:
         (256, 256, 1024),
         (512, 1024, 1024),
         (1024, 512, 1536),
+        (2048, 512, 512),
     ]
     FLOAT_DTYPES = utils.FLOAT_DTYPES
 
@@ -325,6 +328,137 @@ def test_addmm_broadcast_bias(dtype, bias_shape):
         out = torch.addmm(bias, mat1, mat2)
 
     utils.gems_assert_close(out, ref_out, dtype, reduce_dim=K)
+
+
+@pytest.mark.addmm
+@pytest.mark.addmm_out
+@pytest.mark.addmm_dtype
+@pytest.mark.addmm_dtype_out
+@pytest.mark.skipif(
+    flag_gems.vendor_name != "thead",
+    reason="Covers the T-Head large-M column-major mat2 dispatch",
+)
+@pytest.mark.skipif(
+    version.parse(torch.__version__) < version.parse("2.8"),
+    reason="The addmm dtype overloads were added starting from 2.8.0",
+)
+def test_addmm_thead_large_m_api_variants():
+    M, N, K = 1025, 17, 32
+    alpha, beta = 0.75, -0.25
+    dtype = torch.float32
+    mat1 = torch.randn((M, K), dtype=dtype, device=flag_gems.device)
+    mat2 = torch.randn((N, K), dtype=dtype, device=flag_gems.device).t()
+    scalar_bias = torch.randn((), dtype=dtype, device=flag_gems.device)
+    broadcast_bias = torch.randn((1, N), dtype=dtype, device=flag_gems.device)
+    vector_bias = torch.randn((N,), dtype=dtype, device=flag_gems.device)
+
+    ref_mat1 = utils.to_reference(mat1, True)
+    ref_mat2 = utils.to_reference(mat2, True)
+    ref_scalar_bias = utils.to_reference(scalar_bias, True)
+    ref_broadcast_bias = utils.to_reference(broadcast_bias, True)
+    ref_vector_bias = utils.to_reference(vector_bias, True)
+
+    ref = torch.addmm(ref_scalar_bias, ref_mat1, ref_mat2, alpha=alpha, beta=beta)
+    with flag_gems.use_gems():
+        result = torch.addmm(scalar_bias, mat1, mat2, alpha=alpha, beta=beta)
+    utils.gems_assert_close(result, ref, dtype, reduce_dim=K)
+
+    ref = torch.addmm(ref_broadcast_bias, ref_mat1, ref_mat2, alpha=alpha, beta=beta)
+    out = torch.empty((N, M), dtype=dtype, device=flag_gems.device).t()
+    with flag_gems.use_gems():
+        torch.addmm(broadcast_bias, mat1, mat2, alpha=alpha, beta=beta, out=out)
+    utils.gems_assert_close(out, ref, dtype, reduce_dim=K)
+
+    ref = torch.addmm(ref_vector_bias, ref_mat1, ref_mat2, alpha=alpha, beta=beta)
+    with flag_gems.use_gems():
+        result = torch.ops.aten.addmm.dtype(
+            vector_bias,
+            mat1,
+            mat2,
+            torch.float32,
+            alpha=alpha,
+            beta=beta,
+        )
+    utils.gems_assert_close(result, ref, dtype, reduce_dim=K)
+
+    out = torch.empty((N, M), dtype=dtype, device=flag_gems.device).t()
+    with flag_gems.use_gems():
+        torch.ops.aten.addmm.dtype_out(
+            vector_bias,
+            mat1,
+            mat2,
+            torch.float32,
+            alpha=alpha,
+            beta=beta,
+            out=out,
+        )
+    utils.gems_assert_close(out, ref, dtype, reduce_dim=K)
+
+
+@pytest.mark.addmm
+@pytest.mark.addmm_out
+@pytest.mark.skipif(
+    flag_gems.vendor_name not in ("thead", "mthreads"),
+    reason="large aligned FP32 backend fast path is backend-specific",
+)
+def test_addmm_large_aligned_fp32_fast_path(monkeypatch):
+    M, N, K = 4096, 512, 512
+    dtype = torch.float32
+    mat1 = torch.empty((M, K), dtype=dtype, device=flag_gems.device).uniform_(
+        -0.5, 0.5
+    )
+    weight = torch.empty((N, K), dtype=dtype, device=flag_gems.device).uniform_(
+        -0.5, 0.5
+    )
+    mat2 = weight.t()
+    bias = torch.empty((N,), dtype=dtype, device=flag_gems.device).uniform_(
+        -0.5, 0.5
+    )
+
+    ref = torch.addmm(bias, mat1, mat2)
+    with flag_gems.use_gems():
+        result = torch.addmm(bias, mat1, mat2)
+
+    # This path redispatches to the saved vendor kernel, so it must preserve the
+    # native result bit for bit rather than merely satisfying an error tolerance.
+    assert torch.equal(result, ref)
+    utils.gems_assert_close(result, ref, dtype, reduce_dim=K)
+
+    out = torch.empty_like(ref)
+    with flag_gems.use_gems():
+        returned = torch.addmm(bias, mat1, mat2, out=out)
+    assert returned is out
+    assert torch.equal(out, ref)
+
+    grad_mat1 = mat1.detach().requires_grad_()
+    grad_mat2 = weight.detach().requires_grad_().t()
+    grad_bias = bias.detach().requires_grad_()
+    with torch.no_grad():
+        grad_ref = torch.addmm(grad_bias, grad_mat1, grad_mat2)
+
+    with torch.no_grad(), flag_gems.use_gems():
+        if flag_gems.vendor_name == "thead":
+            registered_addmm = next(
+                entry[1]
+                for entry in flag_gems.FULL_CONFIG_BY_FUNC["addmm"]
+                if entry[0] == "addmm"
+            )
+            backend_module = sys.modules[registered_addmm.__module__]
+
+            class _UnexpectedNativeKernel:
+                def call_boxed(self, *args, **kwargs):
+                    raise AssertionError(
+                        "T-Head requires-grad tensors must stay on the FlagGems path"
+                    )
+
+            monkeypatch.setattr(
+                backend_module, "_NATIVE_ADDMM_KERNEL", _UnexpectedNativeKernel()
+            )
+        grad_result = torch.addmm(grad_bias, grad_mat1, grad_mat2)
+    if flag_gems.vendor_name == "mthreads":
+        assert torch.equal(grad_result, grad_ref)
+    else:
+        utils.gems_assert_close(grad_result, grad_ref, dtype, reduce_dim=K)
 
 
 @pytest.mark.addmm_dtype
