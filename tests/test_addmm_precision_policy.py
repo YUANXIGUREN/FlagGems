@@ -65,8 +65,8 @@ def test_hygon_protective_route_captures_cuda_kernel_before_registration():
 
     assert 'torch.library.get_kernel("aten::addmm", "CUDA")' in source
     assert 'torch.library.get_kernel("aten::addmm.out", "CUDA")' in source
-    assert "_NATIVE_ADDMM_KERNEL.call_boxed(" in source
-    assert "_NATIVE_ADDMM_OUT_KERNEL.call_boxed(" in source
+    assert "_call_native_strict_fp32(\n            _NATIVE_ADDMM_KERNEL," in source
+    assert "_call_native_strict_fp32(\n            _NATIVE_ADDMM_OUT_KERNEL," in source
     assert "def _can_use_native_fp32_addmm(" in source
     assert "from .addmm import addmm, addmm_out" in package
     assert '"addmm"' in package
@@ -83,6 +83,19 @@ def test_hygon_native_route_remains_visible_to_flaggems_record_audit():
     assert "logger = logging.getLogger(__name__)" in source
     assert 'logger.debug("GEMS ADDMM")' in source
     assert 'logger.debug("GEMS ADDMM_OUT")' in source
+
+
+def test_hygon_native_route_forces_strict_fp32_for_autoregressive_stability():
+    source_path = (
+        Path(__file__).parents[1]
+        / "src/flag_gems/runtime/backend/_hygon/ops/addmm.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "def _call_native_strict_fp32(" in source
+    assert "backend.allow_tf32 = False" in source
+    assert "backend.allow_tf32 = previous" in source
+    assert "_call_native_strict_fp32(" in source
 
 
 def _fake_torch(*, cuda=None, mudnn=None, npu=None, fallback="highest"):

@@ -17,8 +17,10 @@
 GraphCast uses FP32 AddMM with a one-dimensional bias.  On Hygon, the native
 BLAS implementation is substantially faster than the generic Triton kernel.
 Capture the CUDA-dispatch implementation before FlagGems registers its own
-kernel, then use it only for the validated, inference-safe subset.  All other
-inputs continue to use the upstream generic implementation.
+kernel, then use it only for the validated, inference-safe subset.  Hygon's
+fast-FP32 mode does not meet GraphCast's autoregressive acceptance gate, so the
+native call uses strict FP32 locally and restores the process-wide setting.
+All other inputs continue to use the upstream generic implementation.
 """
 
 import logging
@@ -75,10 +77,23 @@ def _can_use_native_fp32_addmm(bias, mat1, mat2):
     return bias.dim() == 1 and bias.shape[0] == mat2.shape[1]
 
 
+def _call_native_strict_fp32(kernel, *args, **kwargs):
+    """Call a captured Hygon kernel without leaking a global precision change."""
+
+    backend = torch.backends.cuda.matmul
+    previous = backend.allow_tf32
+    backend.allow_tf32 = False
+    try:
+        return kernel.call_boxed(*args, **kwargs)
+    finally:
+        backend.allow_tf32 = previous
+
+
 def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
     if _can_use_native_fp32_addmm(bias, mat1, mat2):
         logger.debug("GEMS ADDMM")
-        return _NATIVE_ADDMM_KERNEL.call_boxed(
+        return _call_native_strict_fp32(
+            _NATIVE_ADDMM_KERNEL,
             _NATIVE_ADDMM_KEYSET,
             bias,
             mat1,
@@ -100,7 +115,8 @@ def addmm_out(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
         and _can_use_native_fp32_addmm(bias, mat1, mat2)
     ):
         logger.debug("GEMS ADDMM_OUT")
-        return _NATIVE_ADDMM_OUT_KERNEL.call_boxed(
+        return _call_native_strict_fp32(
+            _NATIVE_ADDMM_OUT_KERNEL,
             _NATIVE_ADDMM_KEYSET,
             bias,
             mat1,
