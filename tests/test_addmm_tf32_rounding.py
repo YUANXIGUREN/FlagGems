@@ -179,7 +179,7 @@ def test_addmm_tf32_dense_against_rounded_fp64(shape, out_api):
 
 
 @requires_rne_addmm
-def test_mthreads_inference_vector_bias_matches_native_bitwise():
+def test_mthreads_inference_vector_bias_matches_rne_prerounded_native_bitwise():
     torch.manual_seed(20260907)
     m, n, k = 4096, 512, 512
     mat1 = torch.randn((m, k), device=flag_gems.device)
@@ -188,7 +188,12 @@ def test_mthreads_inference_vector_bias_matches_native_bitwise():
     bias = torch.randn((n,), device=flag_gems.device)
 
     with _float32_matmul_mode(True), torch.inference_mode():
-        expected = torch.addmm(bias, mat1, mat2)
+        backend_addmm = importlib.import_module(
+            "flag_gems.runtime.backend._mthreads.ops.addmm"
+        )
+        rounded_mat1 = backend_addmm.round_to_tf32_copy(mat1)
+        rounded_mat2 = backend_addmm.round_to_tf32_copy(mat2)
+        expected = torch.addmm(bias, rounded_mat1, rounded_mat2)
         with flag_gems.use_gems():
             actual = torch.addmm(bias, mat1, mat2)
             out = torch.empty_like(expected)

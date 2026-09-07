@@ -98,6 +98,15 @@ def _get_rounded_tf32_rhs(mat2):
     return _TF32_RHS_CACHE.get(mat2, round_to_tf32_copy)
 
 
+def _prepare_native_fp32_addmm_inputs(mat1, mat2):
+    if not should_use_fast_float32_matmul("mthreads", mat1, mat2):
+        return mat1, mat2
+    # Normalize the logical operands to IEEE TF32 RNE before handing them to
+    # the vendor TensorCore path.  The activation changes every call; an
+    # inference weight can reuse the bounded, version-aware RHS cache.
+    return round_to_tf32_copy(mat1), _get_rounded_tf32_rhs(mat2)
+
+
 def is_supported_sqmma_layout(tensor):
     return tensor.is_contiguous() or (
         tensor.stride(0) == 1 and tensor.stride(1) == tensor.shape[0]
@@ -522,6 +531,7 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
 def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
     logger.debug("GEMS_MTHREADS ADDMM")
     if _can_use_native_fp32_addmm(bias, mat1, mat2):
+        mat1, mat2 = _prepare_native_fp32_addmm_inputs(mat1, mat2)
         return _NATIVE_ADDMM_KERNEL.call_boxed(
             _NATIVE_ADDMM_KEYSET,
             bias,
@@ -543,6 +553,7 @@ def addmm_out(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
         and out.device == mat1.device
         and _can_use_native_fp32_addmm(bias, mat1, mat2)
     ):
+        mat1, mat2 = _prepare_native_fp32_addmm_inputs(mat1, mat2)
         return _NATIVE_ADDMM_OUT_KERNEL.call_boxed(
             _NATIVE_ADDMM_KEYSET,
             bias,
