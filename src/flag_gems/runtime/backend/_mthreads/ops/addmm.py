@@ -30,6 +30,29 @@ from .tf32_cache import TF32RHSCache
 logger = logging.getLogger(__name__)
 
 
+def _load_native_addmm_kernels():
+    """Capture MUSA kernels before FlagGems replaces PrivateUse1 dispatch."""
+
+    keyset = torch._C.DispatchKeySet(torch._C.DispatchKey.PrivateUse1)
+    try:
+        default_kernel = torch.library.get_kernel("aten::addmm", "PrivateUse1")
+        out_kernel = torch.library.get_kernel("aten::addmm.out", "PrivateUse1")
+    except (AttributeError, RuntimeError):
+        return None, None, None
+    return default_kernel, out_kernel, keyset
+
+
+(
+    _NATIVE_ADDMM_KERNEL,
+    _NATIVE_ADDMM_OUT_KERNEL,
+    _NATIVE_ADDMM_KEYSET,
+) = _load_native_addmm_kernels()
+
+_NATIVE_ADDMM_MODE = (
+    "captured_privateuse1" if _NATIVE_ADDMM_KERNEL is not None else "unavailable"
+)
+
+
 EXPAND_CONFIG_FILENAME = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "addmm_mthreads_expand.yaml")
 )
@@ -94,6 +117,31 @@ def is_sqmma_compatible(a, b, N, K):
         and K > 0
         and N % 8 == 0
         and K % 8 == 0
+    )
+
+
+def _can_use_native_fp32_addmm(bias, mat1, mat2):
+    """Use the vendor TensorCore path for safe inference vector-bias calls."""
+
+    if _NATIVE_ADDMM_KERNEL is None:
+        return False
+    if torch.is_grad_enabled() and (
+        bias.requires_grad or mat1.requires_grad or mat2.requires_grad
+    ):
+        return False
+    if bias.dtype != torch.float32 or mat1.dtype != torch.float32:
+        return False
+    if mat2.dtype != torch.float32 or mat1.dim() != 2 or mat2.dim() != 2:
+        return False
+    _, K = mat1.shape
+    if mat2.shape[0] != K:
+        return False
+    N = mat2.shape[1]
+    return (
+        bias.dim() == 1
+        and bias.shape[0] == N
+        and bias.device == mat1.device
+        and mat2.device == mat1.device
     )
 
 
@@ -463,11 +511,37 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
 
 def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
     logger.debug("GEMS_MTHREADS ADDMM")
+    if _can_use_native_fp32_addmm(bias, mat1, mat2):
+        return _NATIVE_ADDMM_KERNEL.call_boxed(
+            _NATIVE_ADDMM_KEYSET,
+            bias,
+            mat1,
+            mat2,
+            beta=beta,
+            alpha=alpha,
+        )
     return _addmm_impl(bias, mat1, mat2, None, beta, alpha)
 
 
 def addmm_out(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
     logger.debug("GEMS_MTHREADS ADDMM_OUT")
+    if (
+        _NATIVE_ADDMM_OUT_KERNEL is not None
+        and out is not None
+        and not out.requires_grad
+        and out.dtype == torch.float32
+        and out.device == mat1.device
+        and _can_use_native_fp32_addmm(bias, mat1, mat2)
+    ):
+        return _NATIVE_ADDMM_OUT_KERNEL.call_boxed(
+            _NATIVE_ADDMM_KEYSET,
+            bias,
+            mat1,
+            mat2,
+            beta=beta,
+            alpha=alpha,
+            out=out,
+        )
     return _addmm_impl(bias, mat1, mat2, out, beta, alpha)
 
 

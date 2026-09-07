@@ -167,3 +167,24 @@ def test_addmm_tf32_dense_against_rounded_fp64(shape, out_api):
     assert_close(
         actual.cpu(), torch.from_numpy(expected), torch.float32, reduce_dim=k
     )
+
+
+@requires_rne_addmm
+def test_mthreads_inference_vector_bias_matches_native_bitwise():
+    torch.manual_seed(20260907)
+    m, n, k = 4096, 512, 512
+    mat1 = torch.randn((m, k), device=flag_gems.device)
+    weight = torch.randn((n, k), device=flag_gems.device)
+    mat2 = weight.T
+    bias = torch.randn((n,), device=flag_gems.device)
+
+    with _float32_matmul_mode(True), torch.inference_mode():
+        expected = torch.addmm(bias, mat1, mat2)
+        with flag_gems.use_gems():
+            actual = torch.addmm(bias, mat1, mat2)
+            out = torch.empty_like(expected)
+            returned = torch.addmm(bias, mat1, mat2, out=out)
+
+    assert torch.equal(actual, expected)
+    assert returned is out
+    assert torch.equal(out, expected)

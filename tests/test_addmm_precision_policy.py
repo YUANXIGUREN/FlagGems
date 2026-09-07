@@ -41,6 +41,19 @@ def test_mthreads_fast_fp32_tune_pool_excludes_unsafe_k32_four_warp_tile():
     )
 
 
+def test_mthreads_protective_route_captures_vendor_kernel_before_registration():
+    source = (
+        Path(__file__).parents[1]
+        / "src/flag_gems/runtime/backend/_mthreads/ops/addmm.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'torch.library.get_kernel("aten::addmm", "PrivateUse1")' in source
+    assert 'torch.library.get_kernel("aten::addmm.out", "PrivateUse1")' in source
+    assert "_NATIVE_ADDMM_KERNEL.call_boxed(" in source
+    assert "_NATIVE_ADDMM_OUT_KERNEL.call_boxed(" in source
+    assert "def _can_use_native_fp32_addmm(" in source
+
+
 def _fake_torch(*, cuda=None, mudnn=None, npu=None, fallback="highest"):
     backends = SimpleNamespace()
     if cuda is not None:
