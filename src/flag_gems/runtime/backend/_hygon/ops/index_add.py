@@ -8,16 +8,18 @@ import triton
 import triton.language as tl
 
 from flag_gems import runtime
+from flag_gems.ops.index_add import (
+    _resolve_index_for_kernel,
+    _validate_index_add_args,
+)
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
 from flag_gems.utils.code_cache import code_cache_dir
 from flag_gems.utils.code_utils import IndentedBuffer
-from flag_gems.utils.triton_version_utils import _triton_version_at_least
 
 logger = logging.getLogger(__name__)
 
-_TRITON_SUPPORTS_BF16_ATOMIC_ADD = _triton_version_at_least(3, 4)
 _FALLBACK_KEYSET = torch._C.DispatchKeySet(
     torch._C.DispatchKey.CompositeExplicitAutograd
 )
@@ -248,7 +250,8 @@ def _can_use_contiguous_suffix_path(inp, dim, index, src):
     if src.numel() == 0:
         return False
     if not (
-        inp.ndim == src.ndim
+        inp.dtype != torch.bfloat16
+        and inp.ndim == src.ndim
         and 0 <= dim < inp.ndim
         and index.ndim == 1
         and index.dtype in (torch.int32, torch.int64)
@@ -461,40 +464,28 @@ def _run_contiguous_suffix_path(out, dim, index, src, alpha):
 
 def index_add(inp, dim, index, src, alpha=1):
     logger.debug("GEMS_HYGON INDEX_ADD")
-    normalized_dim = dim % inp.ndim if -inp.ndim <= dim < inp.ndim else dim
-    if _can_use_contiguous_suffix_path(inp, normalized_dim, index, src):
-        _assert_index_in_bounds(index, inp.size(dim))
-        accumulate_fp32 = (
-            inp.dtype == torch.bfloat16 and not _TRITON_SUPPORTS_BF16_ATOMIC_ADD
-        )
-        out = inp.float() if accumulate_fp32 else inp.clone()
+    dim = _validate_index_add_args(inp, dim, index, src)
+    if src.numel() == 0:
+        return inp.clone(memory_format=torch.contiguous_format)
+
+    index = _resolve_index_for_kernel(index).contiguous()
+    _assert_index_in_bounds(index, inp.size(dim))
+    work_inp = inp.contiguous()
+    work_src = src.contiguous()
+    if _can_use_contiguous_suffix_path(work_inp, dim, index, work_src):
+        accumulate_fp32 = inp.dtype == torch.bfloat16
+        out = work_inp.float() if accumulate_fp32 else work_inp.clone()
         res = _run_contiguous_suffix_path(
-            out, normalized_dim, index.contiguous(), src, alpha
+            out, dim, index, work_src, alpha
         )
         if res is not None:
             return res.to(inp.dtype) if accumulate_fp32 else res
 
-    assert ((0 <= index) * (index < inp.size(dim))).equal(
-        torch.ones(tuple(index.shape), dtype=torch.bool, device=inp.device)
-    ), "0 <= index < self.size(dim)"
-    assert dim >= -inp.ndim and dim < inp.ndim, "Invalid dim"
-    assert index.numel() == src.size(
-        dim
-    ), "The dimth dimension of source must have the same size as the length of index"
-    assert (
-        inp.ndim == src.ndim
-    ), "Self and source should have the same number of dimensions"
-    assert (
-        ((inp.size(i) == src.size(i)) or i == dim) for i in range(0, inp.ndim)
-    ), "src.size(d) == self.size(d) for all dimensions d != dim"
+    accumulate_fp32 = inp.dtype == torch.bfloat16
+    out = work_inp.float() if accumulate_fp32 else work_inp.clone()
+    src_for_kernel = work_src.float() if accumulate_fp32 else work_src
 
-    accumulate_fp32 = (
-        inp.dtype == torch.bfloat16 and not _TRITON_SUPPORTS_BF16_ATOMIC_ADD
-    )
-    out = inp.float() if accumulate_fp32 else inp.clone()
-    src_for_kernel = src.float() if accumulate_fp32 else src
-
-    inp_stride_dim = inp.stride(dim)
+    inp_stride_dim = out.stride(dim)
     src_shape_dim = src_for_kernel.size(dim)
     inp_shape_dim = inp.size(dim)
     delta = inp.size(dim) - src_shape_dim
@@ -510,7 +501,7 @@ def index_add(inp, dim, index, src, alpha=1):
         src_shape_dim,
         delta,
         N,
-        inp.numel(),
+        out.numel(),
         alpha,
     )
     return out.to(inp.dtype) if accumulate_fp32 else out
@@ -518,42 +509,40 @@ def index_add(inp, dim, index, src, alpha=1):
 
 def index_add_(inp, dim, index, src, alpha=1):
     logger.debug("GEMS_HYGON INDEX_ADD_")
-    normalized_dim = dim % inp.ndim if -inp.ndim <= dim < inp.ndim else dim
-    if _can_use_contiguous_suffix_path(inp, normalized_dim, index, src):
-        _assert_index_in_bounds(index, inp.size(dim))
-        accumulate_fp32 = (
-            inp.dtype == torch.bfloat16 and not _TRITON_SUPPORTS_BF16_ATOMIC_ADD
+    dim = _validate_index_add_args(inp, dim, index, src)
+    if src is inp or index is inp:
+        raise RuntimeError(
+            "input overlaps with source or index; clone the overlapping tensor "
+            "before calling index_add_"
         )
-        out = inp.float() if accumulate_fp32 else inp
+    if src.numel() == 0:
+        return inp
+    if torch._C._is_alias_of(inp, src) or torch._C._is_alias_of(inp, index):
+        raise RuntimeError(
+            "input overlaps with source or index; clone the overlapping tensor "
+            "before calling index_add_"
+        )
+
+    index = _resolve_index_for_kernel(index).contiguous()
+    _assert_index_in_bounds(index, inp.size(dim))
+    work_inp = inp if inp.is_contiguous() else inp.contiguous()
+    work_src = src.contiguous()
+    if _can_use_contiguous_suffix_path(work_inp, dim, index, work_src):
+        accumulate_fp32 = inp.dtype == torch.bfloat16
+        out = work_inp.float() if accumulate_fp32 else work_inp
         res = _run_contiguous_suffix_path(
-            out, normalized_dim, index.contiguous(), src, alpha
+            out, dim, index, work_src, alpha
         )
         if res is not None:
-            if accumulate_fp32:
-                inp.copy_(res)
+            if res is not inp:
+                inp.copy_(res.to(inp.dtype) if accumulate_fp32 else res)
             return inp
 
-    assert ((0 <= index) * (index < inp.size(dim))).equal(
-        torch.ones(tuple(index.shape), dtype=torch.bool, device=inp.device)
-    ), "0 <= index < self.size(dim)"
-    assert dim >= -inp.ndim and dim < inp.ndim, "Invalid dim"
-    assert index.numel() == src.size(
-        dim
-    ), "The dimth dimension of source must have the same size as the length of index"
-    assert (
-        inp.ndim == src.ndim
-    ), "Self and source should have the same number of dimensions"
-    assert (
-        ((inp.size(i) == src.size(i)) or i == dim) for i in range(0, inp.ndim)
-    ), "src.size(d) == self.size(d) for all dimensions d != dim"
+    accumulate_fp32 = inp.dtype == torch.bfloat16
+    out = work_inp.float() if accumulate_fp32 else work_inp
+    src_for_kernel = work_src.float() if accumulate_fp32 else work_src
 
-    accumulate_fp32 = (
-        inp.dtype == torch.bfloat16 and not _TRITON_SUPPORTS_BF16_ATOMIC_ADD
-    )
-    out = inp.float() if accumulate_fp32 else inp
-    src_for_kernel = src.float() if accumulate_fp32 else src
-
-    inp_stride_dim = inp.stride(dim)
+    inp_stride_dim = out.stride(dim)
     src_shape_dim = src_for_kernel.size(dim)
     inp_shape_dim = inp.size(dim)
     delta = inp.size(dim) - src_shape_dim
@@ -569,9 +558,9 @@ def index_add_(inp, dim, index, src, alpha=1):
         src_shape_dim,
         delta,
         N,
-        inp.numel(),
+        out.numel(),
         alpha,
     )
-    if accumulate_fp32:
-        inp.copy_(out)
+    if out is not inp:
+        inp.copy_(out.to(inp.dtype) if accumulate_fp32 else out)
     return inp

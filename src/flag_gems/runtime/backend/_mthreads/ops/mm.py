@@ -18,12 +18,17 @@ import os
 import torch
 import triton
 import triton.language as tl
-from triton.tools.tensor_descriptor import TensorDescriptor
 
 from flag_gems import runtime
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
+
+from ._tensor_descriptor import (
+    HAS_TENSOR_DESCRIPTOR,
+    TensorDescriptor,
+    tensor_descriptor_only,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +38,10 @@ EXPAND_CONFIG_FILENAME = os.path.normpath(
 
 # Module-level capability flag: evaluated once at import time, then reused as
 # a constant for the entire process lifetime with no repeated parsing overhead.
-# False when Triton < 3.2 (e.g. 3.1), True when Triton >= 3.2.
-SQMMA_ON = tuple(int(x) for x in triton.__version__.split(".")[:2]) >= (3, 2)
+# False when Triton < 3.2 (e.g. 3.1) or TensorDescriptor is unavailable.
+SQMMA_ON = HAS_TENSOR_DESCRIPTOR and tuple(
+    int(x) for x in triton.__version__.split(".")[:2]
+) >= (3, 2)
 
 
 def is_supported_sqmma_layout(tensor):
@@ -338,26 +345,28 @@ def sqmma_descriptor_pre_hook(nargs):
     nargs["c_desc"].block_shape = [nargs["BLOCK_M"], nargs["BLOCK_N"]]
 
 
-@libentry()
-@libtuner(
-    configs=[
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=1,
-            num_warps=4,
-            pre_hook=sqmma_descriptor_pre_hook,
-        )
-    ],
-    key=["M", "N", "K", "dtype"],
-    strategy=["align32", "align32", "align32", "default"],
-    warmup=5,
-    rep=5,
-    flagtune_op_name="mm",
-    flagtune_expand_op_name="mm_sqmma",
-    flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-    flagtune_pre_hook=sqmma_descriptor_pre_hook,
+@tensor_descriptor_only(libentry())
+@tensor_descriptor_only(
+    libtuner(
+        configs=[
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+                num_stages=1,
+                num_warps=4,
+                pre_hook=sqmma_descriptor_pre_hook,
+            )
+        ],
+        key=["M", "N", "K", "dtype"],
+        strategy=["align32", "align32", "align32", "default"],
+        warmup=5,
+        rep=5,
+        flagtune_op_name="mm",
+        flagtune_expand_op_name="mm_sqmma",
+        flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
+        flagtune_pre_hook=sqmma_descriptor_pre_hook,
+    )
 )
-@triton.jit
+@tensor_descriptor_only(triton.jit)
 def mm_sqmma_kernel(
     a_desc,
     b_desc,

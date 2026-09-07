@@ -19,11 +19,12 @@ from typing import List
 import torch
 import triton
 import triton.language as tl
-from triton.tools.tensor_descriptor import TensorDescriptor
 
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
+
+from ._tensor_descriptor import TensorDescriptor, tensor_descriptor_only
 
 logger = logging.getLogger(__name__)
 EXPAND_CONFIG_FILENAME = os.path.normpath(
@@ -163,26 +164,35 @@ def sqmma_descriptor_pre_hook(nargs):
     nargs["c_desc"].block_shape = [nargs["BLOCK_M"], nargs["BLOCK_N"]]
 
 
-@libentry()
-@libtuner(
-    configs=[
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=4,
-            pre_hook=sqmma_descriptor_pre_hook,
-        )
-    ],
-    key=["M", "N", "K", "stride_am", "stride_bk", "dtype"],
-    strategy=["align32", "align32", "align32", "align32", "align32", "default"],
-    warmup=5,
-    rep=5,
-    flagtune_op_name="w8a8_block_fp8_matmul",
-    flagtune_expand_op_name="w8a8_block_fp8_general_tma",
-    flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-    flagtune_pre_hook=sqmma_descriptor_pre_hook,
+@tensor_descriptor_only(libentry())
+@tensor_descriptor_only(
+    libtuner(
+        configs=[
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 128, "GROUP_M": 8},
+                num_stages=3,
+                num_warps=4,
+                pre_hook=sqmma_descriptor_pre_hook,
+            )
+        ],
+        key=["M", "N", "K", "stride_am", "stride_bk", "dtype"],
+        strategy=[
+            "align32",
+            "align32",
+            "align32",
+            "align32",
+            "align32",
+            "default",
+        ],
+        warmup=5,
+        rep=5,
+        flagtune_op_name="w8a8_block_fp8_matmul",
+        flagtune_expand_op_name="w8a8_block_fp8_general_tma",
+        flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
+        flagtune_pre_hook=sqmma_descriptor_pre_hook,
+    )
 )
-@triton.jit
+@tensor_descriptor_only(triton.jit)
 def w8a8_block_fp8_matmul_sqmma_kernel(
     a_desc,
     b_desc,

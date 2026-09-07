@@ -18,6 +18,7 @@ import torch
 import triton
 import triton.language as tl
 
+from flag_gems.ops.index_add import _validate_index_add_args
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import dim_compress, libentry
 from flag_gems.utils import triton_lang_extension as tle
@@ -295,11 +296,14 @@ def _run_contiguous_suffix_path(out, dim, index, src, alpha):
 def index_add(inp, dim, index, src, alpha=1):
     logger.debug("GEMS_ASCEND INDEX_ADD")
 
+    dim = _validate_index_add_args(inp, dim, index, src)
+    if src.numel() == 0:
+        return inp.clone(memory_format=torch.contiguous_format)
+
     inp = inp.contiguous()
     index = index.contiguous()
     src = src.contiguous()
 
-    dim = dim % inp.ndim
     inp_len = inp.size(dim)
     N = index.numel()
     M = src.numel() // N
@@ -350,10 +354,23 @@ def index_add(inp, dim, index, src, alpha=1):
 def index_add_(inp, dim, index, src, alpha=1):
     logger.debug("GEMS_ASCEND INDEX_ADD_")
 
+    dim = _validate_index_add_args(inp, dim, index, src)
+    if src is inp or index is inp:
+        raise RuntimeError(
+            "input overlaps with source or index; clone the overlapping tensor "
+            "before calling index_add_"
+        )
+    if src.numel() == 0:
+        return inp
+    if torch._C._is_alias_of(inp, src) or torch._C._is_alias_of(inp, index):
+        raise RuntimeError(
+            "input overlaps with source or index; clone the overlapping tensor "
+            "before calling index_add_"
+        )
+
     index = index.contiguous()
     src = src.contiguous()
 
-    dim = dim % inp.ndim
     inp_len = inp.size(dim)
     N = index.numel()
     M = src.numel() // N

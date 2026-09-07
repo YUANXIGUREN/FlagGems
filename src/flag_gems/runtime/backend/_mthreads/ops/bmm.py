@@ -18,18 +18,25 @@ import os
 import torch
 import triton
 import triton.language as tl
-from triton.tools.tensor_descriptor import TensorDescriptor
 
 from flag_gems import runtime
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
 
+from ._tensor_descriptor import (
+    HAS_TENSOR_DESCRIPTOR,
+    TensorDescriptor,
+    tensor_descriptor_only,
+)
+
 logger = logging.getLogger(__name__)
 
 EXPAND_CONFIG_FILENAME = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "bmm_mthreads_expand.yaml")
 )
+
+SQMMA_ON = HAS_TENSOR_DESCRIPTOR
 
 
 def is_supported_sqmma_layout(tensor):
@@ -40,7 +47,8 @@ def is_supported_sqmma_layout(tensor):
 
 def is_sqmma_compatible(a, b, N, K):
     return (
-        a.dtype == b.dtype
+        SQMMA_ON
+        and a.dtype == b.dtype
         and a.dtype in (torch.float16, torch.bfloat16)
         and is_supported_sqmma_layout(a)
         and is_supported_sqmma_layout(b)
@@ -183,26 +191,28 @@ def bmm_sqmma_descriptor_pre_hook(nargs):
     nargs["c_desc"].block_shape = [nargs["BLOCK_SIZE_M"], nargs["BLOCK_SIZE_N"]]
 
 
-@libentry()
-@libtuner(
-    configs=[
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64},
-            num_stages=1,
-            num_warps=4,
-            pre_hook=bmm_sqmma_descriptor_pre_hook,
-        )
-    ],
-    key=["M", "N", "K"],
-    strategy=["align32", "align32", "align32"],
-    warmup=5,
-    rep=5,
-    flagtune_op_name="bmm",
-    flagtune_expand_op_name="bmm_sqmma",
-    flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-    flagtune_pre_hook=bmm_sqmma_descriptor_pre_hook,
+@tensor_descriptor_only(libentry())
+@tensor_descriptor_only(
+    libtuner(
+        configs=[
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64},
+                num_stages=1,
+                num_warps=4,
+                pre_hook=bmm_sqmma_descriptor_pre_hook,
+            )
+        ],
+        key=["M", "N", "K"],
+        strategy=["align32", "align32", "align32"],
+        warmup=5,
+        rep=5,
+        flagtune_op_name="bmm",
+        flagtune_expand_op_name="bmm_sqmma",
+        flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
+        flagtune_pre_hook=bmm_sqmma_descriptor_pre_hook,
+    )
 )
-@triton.jit
+@tensor_descriptor_only(triton.jit)
 def bmm_sqmma_kernel(
     a_desc,
     b_desc,

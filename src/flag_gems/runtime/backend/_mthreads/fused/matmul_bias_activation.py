@@ -17,7 +17,6 @@ import logging
 import torch
 import triton
 import triton.language as tl
-from triton.tools.tensor_descriptor import TensorDescriptor
 
 from flag_gems.fused.matmul_bias_activation import (
     matmul_bias_activation as generic_matmul_bias_activation,
@@ -30,6 +29,10 @@ from flag_gems.runtime.backend._mthreads.ops.mm import (
     SQMMA_ON,
     is_sqmma_compatible,
     is_supported_sqmma_layout,
+)
+from flag_gems.runtime.backend._mthreads.ops._tensor_descriptor import (
+    TensorDescriptor,
+    tensor_descriptor_only,
 )
 from flag_gems.utils import broadcastable_to, libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
@@ -48,25 +51,27 @@ def matmul_bias_activation_sqmma_descriptor_pre_hook(nargs):
     nargs["c_desc"].block_shape = [nargs["BLOCK_M"], nargs["BLOCK_N"]]
 
 
-@libentry()
-@libtuner(
-    configs=[
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=1,
-            num_warps=4,
-            pre_hook=matmul_bias_activation_sqmma_descriptor_pre_hook,
-        )
-    ],
-    key=["M", "N", "K", "dtype"],
-    strategy=["align32", "align32", "align32", "default"],
-    warmup=5,
-    rep=5,
-    flagtune_op_name="matmul_bias_activation",
-    flagtune_expand_op_name="matmul_bias_activation_sqmma",
-    flagtune_pre_hook=matmul_bias_activation_sqmma_descriptor_pre_hook,
+@tensor_descriptor_only(libentry())
+@tensor_descriptor_only(
+    libtuner(
+        configs=[
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+                num_stages=1,
+                num_warps=4,
+                pre_hook=matmul_bias_activation_sqmma_descriptor_pre_hook,
+            )
+        ],
+        key=["M", "N", "K", "dtype"],
+        strategy=["align32", "align32", "align32", "default"],
+        warmup=5,
+        rep=5,
+        flagtune_op_name="matmul_bias_activation",
+        flagtune_expand_op_name="matmul_bias_activation_sqmma",
+        flagtune_pre_hook=matmul_bias_activation_sqmma_descriptor_pre_hook,
+    )
 )
-@triton.jit
+@tensor_descriptor_only(triton.jit)
 def matmul_bias_activation_sqmma_kernel(
     a_desc,
     b_desc,

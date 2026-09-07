@@ -2,7 +2,7 @@ from ._make_dep_token import _make_dep_token
 from ._nested_view_from_buffer_copy import _nested_view_from_buffer_copy
 from ._thnn_fused_lstm_cell_backward_impl import _thnn_fused_lstm_cell_backward_impl
 from .adaptive_max_pool3d_backward import adaptive_max_pool3d_backward
-from .addmm import addmm
+from .addmm import addmm, addmm_dtype, addmm_dtype_out, addmm_out
 from .alpha_dropout import alpha_dropout
 from .amax import amax
 from .arange import arange, arange_start
@@ -21,6 +21,7 @@ from .greater_equal import greater_equal_
 from .groupnorm import group_norm
 from .hadamard_transform import hadamard_transform
 from .index import index
+from .index_add import index_add, index_add_
 from .index_put import index_put, index_put_
 from .index_select import index_select
 from .isin import isin
@@ -55,6 +56,7 @@ from .repeat_interleave import repeat_interleave_self_tensor
 from .resolve_conj import resolve_conj
 from .rsqrt import rsqrt, rsqrt_
 from .sigmoid import sigmoid
+from .silu import silu
 from .special_bessel_j0 import special_bessel_j0, special_bessel_j0_out
 from .special_chebyshev_polynomial_u import special_chebyshev_polynomial_u
 from .special_chebyshev_polynomial_w import (
@@ -82,6 +84,9 @@ __all__ = [
     "_unique2",
     "adaptive_max_pool3d_backward",
     "addmm",
+    "addmm_dtype",
+    "addmm_dtype_out",
+    "addmm_out",
     "alpha_dropout",
     "amax",
     "arange",
@@ -103,6 +108,8 @@ __all__ = [
     "group_norm",
     "hadamard_transform",
     "index",
+    "index_add",
+    "index_add_",
     "index_put",
     "index_put_",
     "index_select",
@@ -152,6 +159,7 @@ __all__ = [
     "rsqrt",
     "rsqrt_",
     "sigmoid",
+    "silu",
     "special_bessel_j0",
     "special_bessel_j0_out",
     "special_chebyshev_polynomial_u",

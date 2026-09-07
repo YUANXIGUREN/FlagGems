@@ -269,7 +269,13 @@ def _import_module_safe(module_name, vendor_name, module_type):
     """Helper to import a module with proper error handling."""
     try:
         return importlib.import_module(module_name)
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as error:
+        missing_module = error.name or ""
+        target_module_missing = missing_module == module_name or (
+            missing_module and module_name.startswith(f"{missing_module}.")
+        )
+        if not target_module_missing:
+            raise
         print(
             f"[Note] No specialized {module_type} operators were found for "
             f"the {vendor_name}, generic {module_type} operators will be used by default."

@@ -18,9 +18,11 @@ import logging
 import torch
 import triton
 
-from flag_gems.ops.addmm import addmm_kernel
 from flag_gems.runtime import torch_device_fn
+from flag_gems.runtime.matmul_precision import should_use_fast_float32_matmul
 from flag_gems.utils import broadcastable_to
+
+from .addmm import addmm_kernel
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,10 @@ def addmm_(self, mat1, mat2, *, beta=1, alpha=1):
             bias.stride(1),
             self.stride(0),
             self.stride(1),
+            BIAS_IS_VECTOR=False,
+            BIAS_IS_SCALAR=False,
+            HAS_K=K > 0,
             IS_FP64=mat1.dtype == torch.float64,
+            ALLOW_TF32=should_use_fast_float32_matmul("thead", mat1, mat2),
         )
     return self
