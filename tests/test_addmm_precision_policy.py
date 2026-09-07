@@ -116,3 +116,17 @@ def test_ascend_addmm_connects_runtime_policy_to_dot_precision():
     assert '"ieee"' in source
     assert "input_precision=INPUT_PRECISION" in source
     assert "acc += tl.dot(a, b, out_dtype=dot_out_dtype, allow_tf32=False)" not in source
+
+
+def test_ascend_missing_optional_tle_does_not_disable_vendor_package():
+    source_path = (
+        Path(__file__).parents[1]
+        / "src/flag_gems/runtime/backend/_ascend/ops/__init__.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "try:\n    from .cholesky_solve import" in source
+    assert 'missing_module == "triton.experimental.tle"' in source
+    assert 'missing_module.startswith("triton.experimental.tle.")' in source
+    assert '__all__.remove("cholesky_solve")' in source
+    assert '__all__.remove("cholesky_solve_out")' in source

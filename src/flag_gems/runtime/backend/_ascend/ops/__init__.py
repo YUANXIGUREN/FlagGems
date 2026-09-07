@@ -31,7 +31,15 @@ from .attention import (
 from .baddbmm import baddbmm
 from .bmm import bmm
 from .cat import cat, cat_out
-from .cholesky_solve import cholesky_solve, cholesky_solve_out
+try:
+    from .cholesky_solve import cholesky_solve, cholesky_solve_out
+except ModuleNotFoundError as error:
+    missing_module = error.name or ""
+    if not (
+        missing_module == "triton.experimental.tle"
+        or missing_module.startswith("triton.experimental.tle.")
+    ):
+        raise
 from .count_nonzero import count_nonzero
 from .cummax import cummax
 from .cummin import cummin
@@ -272,3 +280,7 @@ __all__ = [
     "zeros",
     "zeros_like",
 ]
+
+if "cholesky_solve" not in globals():
+    __all__.remove("cholesky_solve")
+    __all__.remove("cholesky_solve_out")
