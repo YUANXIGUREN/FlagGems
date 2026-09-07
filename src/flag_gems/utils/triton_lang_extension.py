@@ -117,3 +117,14 @@ def fmod(x, y):
 def trunc(x):
     """trunc default - truncate to integer"""
     return tl.where(x >= 0, tl.floor(x), tl.ceil(x))
+
+
+@triton.jit
+def round_to_tf32(x):
+    """Round FP32 to TF32 nearest-even while retaining FP32 storage."""
+
+    tl.static_assert(x.dtype == tl.float32)
+    bits = x.to(tl.uint32, bitcast=True)
+    rounded = (bits + 0xFFF + ((bits >> 13) & 1)) & 0xFFFFE000
+    nonfinite = (bits & 0x7F800000) == 0x7F800000
+    return tl.where(nonfinite, x, rounded.to(tl.float32, bitcast=True))
