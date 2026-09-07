@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+import flag_gems
 from flag_gems.runtime import matmul_precision
 
 
@@ -130,3 +132,69 @@ def test_ascend_missing_optional_tle_does_not_disable_vendor_package():
     assert 'missing_module.startswith("triton.experimental.tle.")' in source
     assert '__all__.remove("cholesky_solve")' in source
     assert '__all__.remove("cholesky_solve_out")' in source
+
+
+@contextmanager
+def _float32_matmul_mode(enabled):
+    vendor_name = flag_gems.vendor_name
+    if vendor_name == "ascend":
+        backend = getattr(getattr(torch, "npu", None), "matmul", None)
+        attribute = "allow_hf32"
+    elif vendor_name == "mthreads":
+        backend = getattr(torch.backends, "mudnn", None)
+        attribute = "allow_tf32"
+    else:
+        backend = getattr(getattr(torch.backends, "cuda", None), "matmul", None)
+        attribute = "allow_tf32"
+
+    if backend is None or not hasattr(backend, attribute):
+        pytest.skip(f"{vendor_name} does not expose a fast-FP32 matmul switch")
+
+    previous = getattr(backend, attribute)
+    setattr(backend, attribute, enabled)
+    try:
+        assert (
+            matmul_precision.is_fast_float32_matmul_enabled(vendor_name) is enabled
+        )
+        yield
+    finally:
+        setattr(backend, attribute, previous)
+
+
+@pytest.mark.skipif(
+    flag_gems.runtime.device.device_count == 0,
+    reason="requires an accelerator device",
+)
+def test_device_addmm_validates_strict_and_fast_fp32_accuracy():
+    torch.manual_seed(20260904)
+    M, N, K = 257, 129, 512
+    mat1 = torch.randn((M, K), device=flag_gems.device, dtype=torch.float32)
+    mat2 = torch.randn((K, N), device=flag_gems.device, dtype=torch.float32)
+    bias = torch.randn((N,), device=flag_gems.device, dtype=torch.float32)
+    reference = torch.addmm(
+        bias.cpu().double(),
+        mat1.cpu().double(),
+        mat2.cpu().double(),
+    ).to(torch.float32)
+
+    with _float32_matmul_mode(False):
+        with flag_gems.use_gems():
+            strict = torch.addmm(bias, mat1, mat2)
+
+    with _float32_matmul_mode(True):
+        with flag_gems.use_gems():
+            fast = torch.addmm(bias, mat1, mat2)
+
+    strict_error = strict.cpu() - reference
+    fast_error = fast.cpu() - reference
+    reference_rms = reference.square().mean().sqrt()
+    strict_normalized_rmse = strict_error.square().mean().sqrt() / reference_rms
+    strict_normalized_max = strict_error.abs().max() / reference.abs().max()
+    fast_normalized_rmse = fast_error.square().mean().sqrt() / reference_rms
+    fast_normalized_max = fast_error.abs().max() / reference.abs().max()
+
+    assert strict_normalized_rmse.item() <= 1e-4
+    assert strict_normalized_max.item() <= 5e-4
+    assert fast_normalized_rmse.item() <= 1e-2
+    assert fast_normalized_max.item() <= 2e-2
+    assert strict.dtype == fast.dtype == torch.float32
