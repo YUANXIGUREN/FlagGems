@@ -21,8 +21,11 @@ import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
 
 from flag_gems.runtime import torch_device_fn
+from flag_gems.runtime.matmul_precision import should_use_fast_float32_matmul
 from flag_gems.utils import broadcastable_to, libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
+
+from .tf32_cache import TF32RHSCache
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,46 @@ logger = logging.getLogger(__name__)
 EXPAND_CONFIG_FILENAME = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "addmm_mthreads_expand.yaml")
 )
+
+_TF32_RHS_CACHE = TF32RHSCache()
+
+
+@libentry()
+@triton.jit
+def _round_to_tf32_copy_kernel(
+    src,
+    dst,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = ext.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    values = tl.load(src + offsets, mask=mask, other=0.0)
+    tl.store(dst + offsets, ext.round_to_tf32(values), mask=mask)
+
+
+def round_to_tf32_copy(tensor):
+    """Materialize a logical FP32 matrix and round it to TF32 RNE once."""
+
+    assert tensor.dtype == torch.float32
+    source = tensor.contiguous()
+    rounded = torch.empty_like(source)
+    n_elements = source.numel()
+    if n_elements == 0:
+        return rounded
+    grid = lambda META: (triton.cdiv(n_elements, META["BLOCK_SIZE"]),)
+    with torch_device_fn.device(source.device):
+        _round_to_tf32_copy_kernel[grid](
+            source,
+            rounded,
+            n_elements,
+            BLOCK_SIZE=1024,
+        )
+    return rounded
+
+
+def _get_rounded_tf32_rhs(mat2):
+    return _TF32_RHS_CACHE.get(mat2, round_to_tf32_copy)
 
 
 def is_supported_sqmma_layout(tensor):
@@ -80,12 +123,17 @@ def _prepare_bias(bias, out):
             num_warps=16,
         ),
         triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 16},
             num_stages=1,
-            num_warps=4,
+            num_warps=8,
+        ),
+        triton.Config(
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 16},
+            num_stages=1,
+            num_warps=16,
         ),
     ],
-    key=["M", "N", "K"],
+    key=["M", "N", "K", "ALLOW_TF32"],
     warmup=5,
     rep=5,
 )
@@ -113,7 +161,9 @@ def addmm_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
+    BETA_IS_ZERO: tl.constexpr,
     IS_FP64: tl.constexpr = False,
+    ALLOW_TF32: tl.constexpr = False,
 ):
     pid_m = ext.program_id(0)
     pid_n = ext.program_id(1)
@@ -141,7 +191,7 @@ def addmm_kernel(
         if IS_FP64:
             a = a.to(tl.float32)
             b = b.to(tl.float32)
-        accumulator += tl.dot(a, b, allow_tf32=False)
+        accumulator += tl.dot(a, b, allow_tf32=ALLOW_TF32)
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
@@ -149,7 +199,9 @@ def addmm_kernel(
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    if BIAS_IS_VECTOR:
+    if BETA_IS_ZERO:
+        bias = 0.0
+    elif BIAS_IS_VECTOR:
         bias = tl.load(
             i_ptr + stride_in * offs_cn,
             mask=offs_cn < N,
@@ -175,15 +227,22 @@ def addmm_fma(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
     M, K = mat1.shape
     _, N = mat2.shape
 
-    if mat1.stride(0) > 1 and mat1.stride(1) > 1:
-        mat1 = mat1.contiguous()
-    mat2_k_contiguous = mat2.stride(0) == 1 and mat2.stride(1) > 1
-    # Direct K-contiguous loads win for small M. With more than eight 128-row
-    # tiles, a coalesced copy is amortized across enough reuse of the B matrix.
-    if (mat2_k_contiguous and M > 8 * 128) or (
-        mat2.stride(0) > 1 and mat2.stride(1) > 1
-    ):
-        mat2 = mat2.contiguous()
+    allow_tf32 = should_use_fast_float32_matmul("mthreads", mat1, mat2)
+    if allow_tf32:
+        # MUSA's fast dot path does not consistently implement IEEE TF32 RNE.
+        # Round each logical operand once, then let the tiled dot use SQMMA.
+        mat1 = round_to_tf32_copy(mat1)
+        mat2 = _get_rounded_tf32_rhs(mat2)
+    else:
+        if mat1.stride(0) > 1 and mat1.stride(1) > 1:
+            mat1 = mat1.contiguous()
+        mat2_k_contiguous = mat2.stride(0) == 1 and mat2.stride(1) > 1
+        # Direct K-contiguous loads win for small M. With more than eight
+        # 128-row tiles, a coalesced copy is amortized across reuse of B.
+        if (mat2_k_contiguous and M > 8 * 128) or (
+            mat2.stride(0) > 1 and mat2.stride(1) > 1
+        ):
+            mat2 = mat2.contiguous()
     if out is None:
         out = torch.empty((M, N), device=mat1.device, dtype=mat1.dtype)
     else:
@@ -226,7 +285,9 @@ def addmm_fma(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
             out.stride(1),
             BIAS_IS_VECTOR=bias_is_vector,
             BIAS_IS_SCALAR=bias_is_scalar,
+            BETA_IS_ZERO=beta == 0,
             IS_FP64=mat1.dtype == torch.float64,
+            ALLOW_TF32=allow_tf32,
         )
     return out
 

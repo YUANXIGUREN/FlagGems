@@ -23,6 +23,23 @@ import flag_gems
 from flag_gems.runtime import matmul_precision
 
 
+def test_mthreads_fast_fp32_tune_pool_excludes_unsafe_k32_four_warp_tile():
+    source = (
+        Path(__file__).parents[1]
+        / "src/flag_gems/runtime/backend/_mthreads/ops/addmm.py"
+    ).read_text(encoding="utf-8")
+    fma_tuner = source[source.index("@libentry()") : source.index("def addmm_kernel")]
+
+    assert (
+        '{"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32}'
+        not in fma_tuner
+    )
+    assert (
+        '{"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 16}'
+        in fma_tuner
+    )
+
+
 def _fake_torch(*, cuda=None, mudnn=None, npu=None, fallback="highest"):
     backends = SimpleNamespace()
     if cuda is not None:
