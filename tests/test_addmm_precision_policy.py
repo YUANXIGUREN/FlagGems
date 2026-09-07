@@ -73,6 +73,18 @@ def test_hygon_protective_route_captures_cuda_kernel_before_registration():
     assert '"addmm_out"' in package
 
 
+def test_hygon_native_route_remains_visible_to_flaggems_record_audit():
+    source_path = (
+        Path(__file__).parents[1]
+        / "src/flag_gems/runtime/backend/_hygon/ops/addmm.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "logger = logging.getLogger(__name__)" in source
+    assert 'logger.debug("GEMS ADDMM")' in source
+    assert 'logger.debug("GEMS ADDMM_OUT")' in source
+
+
 def _fake_torch(*, cuda=None, mudnn=None, npu=None, fallback="highest"):
     backends = SimpleNamespace()
     if cuda is not None:
