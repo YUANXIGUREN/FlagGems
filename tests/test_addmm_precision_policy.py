@@ -221,6 +221,20 @@ def test_ascend_addmm_connects_runtime_policy_to_dot_precision():
     assert "acc += tl.dot(a, b, out_dtype=dot_out_dtype, allow_tf32=False)" not in source
 
 
+def test_ascend_graphcast_route_uses_fused_npu_linear_primitive():
+    source_path = (
+        Path(__file__).parents[1]
+        / "src/flag_gems/runtime/backend/_ascend/ops/addmm.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "def _can_use_npu_linear(" in source
+    assert "torch.ops.npu.npu_linear.default(" in source
+    assert 'mat1.device.type != "npu"' in source
+    assert "_scalar_eq(alpha, 1)" in source
+    assert "_scalar_eq(beta, 1)" in source
+
+
 def test_ascend_missing_optional_tle_does_not_disable_vendor_package():
     source_path = (
         Path(__file__).parents[1]

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from numbers import Number
 
 import torch
 import triton
@@ -27,6 +28,30 @@ from flag_gems.runtime.matmul_precision import (
 from flag_gems.utils import broadcastable_to, libentry, libtuner
 
 logger = logging.getLogger(__name__)
+
+
+def _scalar_eq(value, target):
+    return isinstance(value, Number) and value == target
+
+
+def _can_use_npu_linear(bias, mat1, mat2, alpha, beta):
+    """Use the fused Cube-backed primitive for GraphCast inference calls."""
+
+    if not (_scalar_eq(alpha, 1) and _scalar_eq(beta, 1)):
+        return False
+    if torch.is_grad_enabled() and (
+        bias.requires_grad or mat1.requires_grad or mat2.requires_grad
+    ):
+        return False
+    if bias.dtype != torch.float32 or mat1.dtype != torch.float32:
+        return False
+    if mat2.dtype != torch.float32 or mat1.dim() != 2 or mat2.dim() != 2:
+        return False
+    if mat1.device.type != "npu" or mat2.device != mat1.device:
+        return False
+    if bias.device != mat1.device or mat2.shape[0] != mat1.shape[1]:
+        return False
+    return bias.dim() == 1 and bias.shape[0] == mat2.shape[1]
 
 
 @libentry()
@@ -191,6 +216,10 @@ def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
     assert broadcastable_to(
         bias.shape, (mat1.shape[0], mat2.shape[1])
     ), "Incompatible input shape"
+    if _can_use_npu_linear(bias, mat1, mat2, alpha, beta):
+        # npu_linear expects [N, K] weights; GraphCast's AddMM RHS is [K, N].
+        # Exact shape/layout replay verified both compact and padded transpose views.
+        return torch.ops.npu.npu_linear.default(mat1, mat2.t(), bias)
     M = mat1.shape[0]
     N = mat2.shape[1]
     out = torch.empty((M, N), device=mat1.device, dtype=mat1.dtype)
