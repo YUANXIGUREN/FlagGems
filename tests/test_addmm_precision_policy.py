@@ -54,6 +54,25 @@ def test_mthreads_protective_route_captures_vendor_kernel_before_registration():
     assert "def _can_use_native_fp32_addmm(" in source
 
 
+def test_hygon_protective_route_captures_cuda_kernel_before_registration():
+    root = Path(__file__).parents[1]
+    source_path = root / "src/flag_gems/runtime/backend/_hygon/ops/addmm.py"
+    package_path = root / "src/flag_gems/runtime/backend/_hygon/ops/__init__.py"
+
+    assert source_path.exists()
+    source = source_path.read_text(encoding="utf-8")
+    package = package_path.read_text(encoding="utf-8")
+
+    assert 'torch.library.get_kernel("aten::addmm", "CUDA")' in source
+    assert 'torch.library.get_kernel("aten::addmm.out", "CUDA")' in source
+    assert "_NATIVE_ADDMM_KERNEL.call_boxed(" in source
+    assert "_NATIVE_ADDMM_OUT_KERNEL.call_boxed(" in source
+    assert "def _can_use_native_fp32_addmm(" in source
+    assert "from .addmm import addmm, addmm_out" in package
+    assert '"addmm"' in package
+    assert '"addmm_out"' in package
+
+
 def _fake_torch(*, cuda=None, mudnn=None, npu=None, fallback="highest"):
     backends = SimpleNamespace()
     if cuda is not None:
