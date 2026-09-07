@@ -63,6 +63,7 @@ def addmm_kernel(
     EVEN_K: tl.constexpr,
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
+    BETA_IS_ZERO: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -105,20 +106,23 @@ def addmm_kernel(
 
     C += ram[:, None] * stride_cm + rbn[None, :] * stride_cn
     mask = (ram < M)[:, None] & (rbn < N)[None, :]
-    if BIAS_IS_VECTOR:
-        # Load a 1-D bias once per output-column tile.
-        bias_tile = tl.load(
-            bias + stride_in * rbn,
-            mask=rbn < N,
-            other=0.0,
-        )[None, :]
-    elif BIAS_IS_SCALAR:
-        bias_tile = tl.load(bias)
+    if BETA_IS_ZERO:
+        result = acc * alpha
     else:
-        bias += stride_im * ram[:, None] + stride_in * rbn[None, :]
-        bias_tile = tl.load(bias, mask=mask, other=0.0)
-    acc = acc * alpha + bias_tile.to(acc.dtype) * beta
-    tl.store(C, acc.to(C.dtype.element_ty), mask=mask)
+        if BIAS_IS_VECTOR:
+            # Load a 1-D bias once per output-column tile.
+            bias_tile = tl.load(
+                bias + stride_in * rbn,
+                mask=rbn < N,
+                other=0.0,
+            )[None, :]
+        elif BIAS_IS_SCALAR:
+            bias_tile = tl.load(bias)
+        else:
+            bias += stride_im * ram[:, None] + stride_in * rbn[None, :]
+            bias_tile = tl.load(bias, mask=mask, other=0.0)
+        result = acc * alpha + bias_tile.to(acc.dtype) * beta
+    tl.store(C, result.to(C.dtype.element_ty), mask=mask)
 
 
 def _launch_addmm(bias, mat1, mat2, out, alpha, beta):
@@ -171,6 +175,7 @@ def _launch_addmm(bias, mat1, mat2, out, alpha, beta):
             GROUP_M=8,
             BIAS_IS_VECTOR=bias_is_vector,
             BIAS_IS_SCALAR=bias_is_scalar,
+            BETA_IS_ZERO=beta == 0,
             INPUT_PRECISION=(
                 "hf32"
                 if should_use_fast_float32_matmul("ascend", mat1, mat2)

@@ -51,7 +51,14 @@ _ADDMM_LAYOUT_BIAS_VENDORS = (
     "mthreads",
     "metax",
 )
-_ADDMM_BETA_ZERO_VENDORS = ("nvidia", "hygon", "thead", "metax")
+_ADDMM_BETA_ZERO_VENDORS = (
+    "ascend",
+    "nvidia",
+    "hygon",
+    "thead",
+    "mthreads",
+    "metax",
+)
 
 # Extend this set as vendor implementations gain equivalent layout and bias support.
 _addmm_layout_bias_only = pytest.mark.skipif(

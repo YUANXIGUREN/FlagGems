@@ -396,6 +396,7 @@ def addmm_sqmma_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
+    BETA_IS_ZERO: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -415,18 +416,26 @@ def addmm_sqmma_kernel(
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    if BIAS_IS_VECTOR:
-        bias = tl.load(
-            bias_ptr + offs_n * stride_in,
-            mask=offs_n < N,
-            other=0.0,
-        )[None, :]
-    elif BIAS_IS_SCALAR:
-        bias = tl.load(bias_ptr)
+    if BETA_IS_ZERO:
+        result = alpha * accumulator
     else:
-        bias_ptrs = bias_ptr + offs_m[:, None] * stride_im + offs_n[None, :] * stride_in
-        bias = tl.load(bias_ptrs, mask=mask, other=0.0)
-    result = (alpha * accumulator + beta * bias).to(c_desc.dtype)
+        if BIAS_IS_VECTOR:
+            bias = tl.load(
+                bias_ptr + offs_n * stride_in,
+                mask=offs_n < N,
+                other=0.0,
+            )[None, :]
+        elif BIAS_IS_SCALAR:
+            bias = tl.load(bias_ptr)
+        else:
+            bias_ptrs = (
+                bias_ptr
+                + offs_m[:, None] * stride_im
+                + offs_n[None, :] * stride_in
+            )
+            bias = tl.load(bias_ptrs, mask=mask, other=0.0)
+        result = alpha * accumulator + beta * bias
+    result = result.to(c_desc.dtype)
     tl.store_tensor_descriptor(c_desc, [offs_am, offs_bn], result)
 
 
@@ -474,6 +483,7 @@ def addmm_sqmma(mat1, mat2, bias, elem_type, alpha, beta, M, N, K, out=None):
         str(a_type).split(".")[-1],
         BIAS_IS_VECTOR=bias_is_vector,
         BIAS_IS_SCALAR=bias_is_scalar,
+        BETA_IS_ZERO=beta == 0,
     )
     return out
 
