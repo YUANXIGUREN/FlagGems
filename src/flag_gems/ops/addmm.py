@@ -20,6 +20,7 @@ import triton.language as tl
 
 from flag_gems import runtime
 from flag_gems.runtime import torch_device_fn
+from flag_gems.runtime.matmul_precision import should_use_fast_float32_matmul
 from flag_gems.utils import broadcastable_to, libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
 
@@ -32,18 +33,19 @@ def _accumulate_dot(
     a,
     b,
     IS_FP64: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
 ):
     if IS_FP64:
         a = a.to(tl.float32)
         b = b.to(tl.float32)
-    return accumulator + tl.dot(a, b, allow_tf32=False)
+    return accumulator + tl.dot(a, b, allow_tf32=ALLOW_TF32)
 
 
 @libentry()
 @libtuner(
     configs=runtime.get_tuned_config("addmm"),
-    key=["M", "N", "K", "stride_am", "stride_bk"],
-    strategy=["align32", "align32", "align32", "align32", "align32"],
+    key=["M", "N", "K", "stride_am", "stride_bk", "ALLOW_TF32"],
+    strategy=["align32", "align32", "align32", "align32", "align32", "default"],
     warmup=5,
     rep=10,
     flagtune_op_name="addmm",
@@ -74,6 +76,7 @@ def addmm_kernel(
     BIAS_IS_SCALAR: tl.constexpr,
     HAS_K: tl.constexpr,
     IS_FP64: tl.constexpr = False,
+    ALLOW_TF32: tl.constexpr = False,
 ):
     pid_m = ext.program_id(0)
     pid_n = ext.program_id(1)
@@ -105,6 +108,7 @@ def addmm_kernel(
                 a,
                 b,
                 IS_FP64,
+                ALLOW_TF32,
             )
             a_ptrs += BLOCK_SIZE_K * stride_ak
             b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -185,6 +189,9 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
             BIAS_IS_SCALAR=bias_is_scalar,
             HAS_K=K > 0,
             IS_FP64=mat1.dtype == torch.float64,
+            ALLOW_TF32=should_use_fast_float32_matmul(
+                runtime.device.vendor_name, mat1, mat2
+            ),
         )
     return out
 

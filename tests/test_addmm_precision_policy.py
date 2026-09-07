@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager
+import importlib
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -120,6 +121,57 @@ def test_fast_float32_is_limited_to_fp32_operands(
         matmul_precision.should_use_fast_float32_matmul("nvidia", lhs, rhs)
         is expected
     )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_common_addmm_passes_precision_mode_to_kernel(monkeypatch, enabled):
+    addmm_module = importlib.import_module("flag_gems.ops.addmm")
+    captured = {}
+
+    class FakeKernel:
+        def __getitem__(self, _grid):
+            def launch(*_args, **kwargs):
+                captured.update(kwargs)
+
+            return launch
+
+    monkeypatch.setattr(addmm_module, "addmm_kernel", FakeKernel())
+    monkeypatch.setattr(
+        addmm_module,
+        "torch_device_fn",
+        SimpleNamespace(device=lambda _device: nullcontext()),
+    )
+    monkeypatch.setattr(
+        addmm_module,
+        "should_use_fast_float32_matmul",
+        lambda *_args: enabled,
+    )
+
+    bias = torch.zeros(4, dtype=torch.float32)
+    mat1 = torch.zeros((2, 3), dtype=torch.float32)
+    mat2 = torch.zeros((3, 4), dtype=torch.float32)
+    addmm_module._addmm_impl(bias, mat1, mat2, None, beta=1, alpha=1)
+
+    assert captured["ALLOW_TF32"] is enabled
+
+
+def test_common_addmm_tuning_cache_separates_precision_modes():
+    addmm_module = importlib.import_module("flag_gems.ops.addmm")
+    tuner = addmm_module.addmm_kernel.fn
+    args = {
+        "M": 128,
+        "N": 256,
+        "K": 512,
+        "stride_am": 512,
+        "stride_bk": 256,
+        "ALLOW_TF32": False,
+    }
+
+    strict_key = tuner.get_key(args)
+    args["ALLOW_TF32"] = True
+    fast_key = tuner.get_key(args)
+
+    assert strict_key != fast_key
 
 
 def test_ascend_addmm_connects_runtime_policy_to_dot_precision():
