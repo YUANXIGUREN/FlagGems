@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 from pathlib import Path
 
 import numpy as np
@@ -95,6 +96,9 @@ def test_mthreads_addmm_rounds_once_before_tiled_dot():
 @requires_rne_addmm
 @pytest.mark.parametrize("column_major", [False, True])
 def test_addmm_tf32_rounds_inputs(column_major):
+    backend_addmm = importlib.import_module(
+        "flag_gems.runtime.backend._mthreads.ops.addmm"
+    )
     values = [
         1.0007,
         -1.0007,
@@ -122,13 +126,13 @@ def test_addmm_tf32_rounds_inputs(column_major):
     bias = torch.zeros(64, device=flag_gems.device)
 
     with _float32_matmul_mode(True), torch.inference_mode():
-        result = flag_gems.addmm(bias, mat1, mat2).cpu()
+        result = backend_addmm.addmm_fma(bias, mat1, mat2).cpu()
     torch.testing.assert_close(
         result, torch.tensor(expected).repeat(64, 8), rtol=0, atol=0
     )
 
     with _float32_matmul_mode(False), torch.inference_mode():
-        strict = flag_gems.addmm(bias, mat1, mat2).cpu()
+        strict = backend_addmm.addmm_fma(bias, mat1, mat2).cpu()
     torch.testing.assert_close(strict, mat1.cpu(), rtol=0, atol=0)
 
 
@@ -141,6 +145,9 @@ def _oracle_round(values):
 @pytest.mark.parametrize("shape", [(64, 256, 184), (128, 512, 512)])
 @pytest.mark.parametrize("out_api", [False, True])
 def test_addmm_tf32_dense_against_rounded_fp64(shape, out_api):
+    backend_addmm = importlib.import_module(
+        "flag_gems.runtime.backend._mthreads.ops.addmm"
+    )
     m, n, k = shape
     rng = np.random.default_rng(519)
     mat1 = rng.standard_normal((m, k)).astype(np.float32)
@@ -157,12 +164,14 @@ def test_addmm_tf32_dense_against_rounded_fp64(shape, out_api):
     with _float32_matmul_mode(True), torch.inference_mode():
         if out_api:
             out = torch.empty((n, m), device=lhs.device).T
-            actual = flag_gems.addmm_out(
+            actual = backend_addmm.addmm_fma(
                 inp, lhs, rhs, alpha=0.75, beta=-0.5, out=out
             )
             assert actual.data_ptr() == out.data_ptr()
         else:
-            actual = flag_gems.addmm(inp, lhs, rhs, alpha=0.75, beta=-0.5)
+            actual = backend_addmm.addmm_fma(
+                inp, lhs, rhs, alpha=0.75, beta=-0.5
+            )
 
     assert_close(
         actual.cpu(), torch.from_numpy(expected), torch.float32, reduce_dim=k
