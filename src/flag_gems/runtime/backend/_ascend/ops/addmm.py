@@ -21,6 +21,9 @@ import triton.language as tl
 from flag_gems import runtime
 from flag_gems.runtime import torch_device_fn
 from flag_gems.runtime.backend._ascend import heuristics_config_utils as _hcu
+from flag_gems.runtime.matmul_precision import (
+    should_use_fast_float32_matmul,
+)
 from flag_gems.utils import broadcastable_to, libentry, libtuner
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,7 @@ def addmm_kernel(
     EVEN_K: tl.constexpr,
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     pid = tl.program_id(0)
     pid_z = tl.program_id(1)
@@ -95,7 +99,7 @@ def addmm_kernel(
                 mask=(rk < k_remaining)[:, None] & (rbn < N)[None, :],
                 other=0.0,
             )
-        acc += tl.dot(a, b, out_dtype=dot_out_dtype, allow_tf32=False)
+        acc += tl.dot(a, b, out_dtype=dot_out_dtype, input_precision=INPUT_PRECISION)
         A += BLOCK_K * SPLIT_K * stride_ak
         B += BLOCK_K * SPLIT_K * stride_bk
 
@@ -167,6 +171,11 @@ def _launch_addmm(bias, mat1, mat2, out, alpha, beta):
             GROUP_M=8,
             BIAS_IS_VECTOR=bias_is_vector,
             BIAS_IS_SCALAR=bias_is_scalar,
+            INPUT_PRECISION=(
+                "hf32"
+                if should_use_fast_float32_matmul("ascend", mat1, mat2)
+                else "ieee"
+            ),
         )
     return out
 

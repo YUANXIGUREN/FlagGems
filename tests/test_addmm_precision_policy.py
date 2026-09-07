@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -100,3 +101,18 @@ def test_fast_float32_is_limited_to_fp32_operands(
         matmul_precision.should_use_fast_float32_matmul("nvidia", lhs, rhs)
         is expected
     )
+
+
+def test_ascend_addmm_connects_runtime_policy_to_dot_precision():
+    source_path = (
+        Path(__file__).parents[1]
+        / "src/flag_gems/runtime/backend/_ascend/ops/addmm.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "from flag_gems.runtime.matmul_precision import (" in source
+    assert 'should_use_fast_float32_matmul("ascend", mat1, mat2)' in source
+    assert '"hf32"' in source
+    assert '"ieee"' in source
+    assert "input_precision=INPUT_PRECISION" in source
+    assert "acc += tl.dot(a, b, out_dtype=dot_out_dtype, allow_tf32=False)" not in source
