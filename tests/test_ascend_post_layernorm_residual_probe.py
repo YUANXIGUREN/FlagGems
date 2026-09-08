@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import importlib.util
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -52,6 +54,24 @@ def _sparse_post_layer_norm_residual(x, residual, normalized_shape, weight, bias
     return _post_layer_norm_residual(
         x, residual, normalized_shape, weight, bias, eps
     ).to_sparse()
+
+
+def _torch_npu_module(available):
+    class FakeNpu:
+        @staticmethod
+        def is_available():
+            return available
+
+        @staticmethod
+        def get_device_name(index):
+            assert index == 0
+            return "FakeNPU"
+
+        @staticmethod
+        def get_soc_version():
+            return 1
+
+    return SimpleNamespace(__version__="test", __file__="/tmp/torch_npu.py", npu=FakeNpu())
 
 
 def test_schema_filter_requires_layer_norm_and_add_or_residual():
@@ -200,3 +220,73 @@ def test_probe_records_fail_closed_output_contract_failure_for_unsupported_layou
 
     assert result["status"] == "output_contract_failure"
     assert all(case["status"] == "output_contract_failure" for case in result["cases"])
+
+
+def test_torch_npu_import_failure_is_inconclusive_and_never_authorizes_triton():
+    probe = _load_probe_module()
+
+    def unavailable_torch_npu():
+        raise ImportError("torch_npu absent")
+
+    report = probe.run_probe(torch_npu_loader=unavailable_torch_npu)
+
+    assert report["decision"] == "inconclusive"
+    assert report["probe_status"] == "error"
+    assert report["probe_complete"] is False
+    assert report["triton_authorized"] is False
+    assert report["reason"] == "torch_npu_unavailable"
+
+
+def test_npu_unavailable_is_inconclusive_and_never_authorizes_triton():
+    probe = _load_probe_module()
+
+    report = probe.run_probe(torch_npu_loader=lambda: _torch_npu_module(False))
+
+    assert report["decision"] == "inconclusive"
+    assert report["probe_status"] == "error"
+    assert report["probe_complete"] is False
+    assert report["triton_authorized"] is False
+    assert report["reason"] == "npu_unavailable"
+
+
+def test_discovery_failure_is_inconclusive_and_never_authorizes_triton(monkeypatch):
+    probe = _load_probe_module()
+
+    def unavailable_schemas():
+        raise RuntimeError("dispatcher inaccessible")
+
+    monkeypatch.setattr(probe, "_schema_records", unavailable_schemas)
+    report = probe.run_probe(torch_npu_loader=lambda: _torch_npu_module(True))
+
+    assert report["decision"] == "inconclusive"
+    assert report["reason"] == "schema_discovery_failure"
+    assert report["triton_authorized"] is False
+
+
+def test_cli_writes_partial_inconclusive_artifact_and_returns_nonzero(monkeypatch, tmp_path, capsys):
+    probe = _load_probe_module()
+    output = tmp_path / "partial.json"
+    partial = {
+        "decision": "inconclusive",
+        "probe_status": "error",
+        "probe_complete": False,
+        "triton_authorized": False,
+        "reason": "torch_npu_unavailable",
+    }
+    monkeypatch.setattr(probe, "run_probe", lambda *args: partial)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "probe",
+            "--output",
+            str(output),
+            "--source-revision",
+            "test",
+            "--source-worktree",
+            "/tmp/source",
+        ],
+    )
+
+    assert probe.main() == 2
+    assert json.loads(output.read_text()) == partial
+    assert json.loads(capsys.readouterr().out)["decision"] == "inconclusive"

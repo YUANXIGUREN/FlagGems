@@ -449,45 +449,98 @@ def _report_identity(
     }
 
 
+def _inconclusive_report(
+    *,
+    source_revision: str | None,
+    source_worktree: str | None,
+    reason: str,
+    runtime: dict[str, Any],
+    error: Exception | None = None,
+    public_torch_npu_apis: list[dict[str, Any]] | None = None,
+    public_torch_npu_npu_apis: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "probe_version": 1,
+        **_report_identity(source_revision, source_worktree),
+        "decision": "inconclusive",
+        "probe_status": "error",
+        "probe_complete": False,
+        "triton_authorized": False,
+        "reason": reason,
+        "runtime": runtime,
+        "schema_candidates": [],
+        "public_torch_npu_apis": public_torch_npu_apis or [],
+        "public_torch_npu_npu_apis": public_torch_npu_npu_apis or [],
+    }
+    if error is not None:
+        report["error_type"] = type(error).__name__
+        report["error"] = str(error)
+    return report
+
+
+def _load_torch_npu() -> Any:
+    import torch_npu
+
+    return torch_npu
+
+
 def run_probe(
     device: str = "npu:0",
     source_revision: str | None = None,
     source_worktree: str | None = None,
+    torch_npu_loader: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     """Inspect installed Torch-NPU schemas and execute only safely bound ones."""
     try:
-        import torch_npu  # noqa: F401
+        torch_npu = (torch_npu_loader or _load_torch_npu)()
     except Exception as error:
-        return {
-            "probe_version": 1,
-            **_report_identity(source_revision, source_worktree),
-            "decision": "triton_task_6",
-            "reason": "torch_npu_unavailable",
-            "runtime": _runtime_identity(None),
-            "error_type": type(error).__name__,
-            "error": str(error),
-            "schema_candidates": [],
-            "public_torch_npu_apis": [],
-            "public_torch_npu_npu_apis": [],
-        }
+        return _inconclusive_report(
+            source_revision=source_revision,
+            source_worktree=source_worktree,
+            reason="torch_npu_unavailable",
+            runtime=_runtime_identity(None),
+            error=error,
+        )
 
-    runtime = _runtime_identity(torch_npu)
+    try:
+        runtime = _runtime_identity(torch_npu)
+        public_torch_npu_apis = _public_api_records(torch_npu, "torch_npu")
+        public_torch_npu_npu_apis = _public_api_records(
+            torch_npu.npu, "torch_npu.npu"
+        )
+    except Exception as error:
+        return _inconclusive_report(
+            source_revision=source_revision,
+            source_worktree=source_worktree,
+            reason="runtime_or_public_api_inspection_failure",
+            runtime=_runtime_identity(None),
+            error=error,
+        )
     if not runtime["npu_available"]:
-        return {
-            "probe_version": 1,
-            **_report_identity(source_revision, source_worktree),
-            "decision": "triton_task_6",
-            "reason": "npu_unavailable",
-            "runtime": runtime,
-            "schema_candidates": [],
-            "public_torch_npu_apis": _public_api_records(torch_npu, "torch_npu"),
-            "public_torch_npu_npu_apis": _public_api_records(
-                torch_npu.npu, "torch_npu.npu"
-            ),
-        }
+        return _inconclusive_report(
+            source_revision=source_revision,
+            source_worktree=source_worktree,
+            reason="npu_unavailable",
+            runtime=runtime,
+            public_torch_npu_apis=public_torch_npu_apis,
+            public_torch_npu_npu_apis=public_torch_npu_npu_apis,
+        )
 
+    try:
+        schemas = _schema_records()
+        cases = make_cases(device)
+    except Exception as error:
+        return _inconclusive_report(
+            source_revision=source_revision,
+            source_worktree=source_worktree,
+            reason="schema_discovery_failure",
+            runtime=runtime,
+            error=error,
+            public_torch_npu_apis=public_torch_npu_apis,
+            public_torch_npu_npu_apis=public_torch_npu_npu_apis,
+        )
     records = []
-    for schema in _schema_records():
+    for schema in schemas:
         operation_name = _schema_operation_name(schema)
         callable_schema = str(schema)
         try:
@@ -511,7 +564,7 @@ def run_probe(
                 operation_name=operation_name,
                 callable_schema=callable_schema,
                 candidate=candidate,
-                cases=make_cases(device),
+                cases=cases,
                 binder=lambda case, schema=schema: _bind_schema(schema, case),
             )
         )
@@ -521,11 +574,14 @@ def run_probe(
         "probe_version": 1,
         **_report_identity(source_revision, source_worktree),
         "decision": "vendor_primitive" if accepted else "triton_task_6",
+        "probe_status": "complete",
+        "probe_complete": True,
+        "triton_authorized": not accepted,
         "reason": "validated_post_semantic_primitive" if accepted else "no_validated_post_semantic_primitive",
         "runtime": runtime,
         "schema_candidates": records,
-        "public_torch_npu_apis": _public_api_records(torch_npu, "torch_npu"),
-        "public_torch_npu_npu_apis": _public_api_records(torch_npu.npu, "torch_npu.npu"),
+        "public_torch_npu_apis": public_torch_npu_apis,
+        "public_torch_npu_npu_apis": public_torch_npu_npu_apis,
     }
 
 
@@ -554,7 +610,7 @@ def main() -> int:
             }
         )
     )
-    return 0
+    return 0 if report["probe_complete"] else 2
 
 
 if __name__ == "__main__":
