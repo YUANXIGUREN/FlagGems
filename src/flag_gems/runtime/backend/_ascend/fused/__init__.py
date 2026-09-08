@@ -24,6 +24,7 @@ from .fused_moe import (
 )
 from .moe_align_block_size import moe_align_block_size, moe_align_block_size_triton
 from .moe_sum import moe_sum
+from .post_layernorm_residual import post_layer_norm_residual
 from .rotary_embedding import apply_rotary_pos_emb
 from .skip_layernorm import skip_layer_norm
 from .sparse_attention import sparse_attn_triton
@@ -34,6 +35,7 @@ __all__ = [
     "flash_mla",
     "fused_add_rms_norm",
     "skip_layer_norm",
+    "post_layer_norm_residual",
     "sparse_attn_triton",
     "moe_align_block_size",
     "moe_align_block_size_triton",
