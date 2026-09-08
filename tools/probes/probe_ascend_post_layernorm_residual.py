@@ -68,6 +68,7 @@ def _tensor_description(tensor: torch.Tensor) -> dict[str, Any]:
     return {
         "dtype": _dtype_name(tensor.dtype),
         "device": str(tensor.device),
+        "layout": str(tensor.layout),
         "shape": list(tensor.shape),
         "stride": list(tensor.stride()),
         "contiguous": tensor.is_contiguous(),
@@ -153,10 +154,59 @@ def _requirements_match(
     checks = {
         "dtype": actual.dtype == post.dtype,
         "device": actual.device == post.device,
+        "layout": actual.layout == post.layout,
         "shape": tuple(actual.shape) == tuple(post.shape),
         "stride": tuple(actual.stride()) == tuple(post.stride()),
+        "contiguous": actual.is_contiguous() == post.is_contiguous(),
     }
     return all(checks.values()), checks
+
+
+def _reference_case(case: SimpleNamespace) -> SimpleNamespace:
+    return SimpleNamespace(
+        x=case.x.detach().clone(),
+        residual=case.residual.detach().clone(),
+        normalized_shape=case.normalized_shape,
+        weight=case.weight.detach().clone() if case.weight is not None else None,
+        bias=case.bias.detach().clone() if case.bias is not None else None,
+        eps=case.eps,
+    )
+
+
+def _input_integrity(
+    case: SimpleNamespace, reference: SimpleNamespace
+) -> dict[str, bool]:
+    def unchanged(actual: torch.Tensor | None, expected: torch.Tensor | None) -> bool:
+        if actual is None or expected is None:
+            return actual is expected
+        try:
+            return bool(
+                actual.dtype == expected.dtype
+                and actual.device == expected.device
+                and actual.layout == expected.layout
+                and tuple(actual.shape) == tuple(expected.shape)
+                and tuple(actual.stride()) == tuple(expected.stride())
+                and torch.equal(actual, expected)
+            )
+        except Exception:
+            return False
+
+    return {
+        "x": unchanged(case.x, reference.x),
+        "residual": unchanged(case.residual, reference.residual),
+        "weight": unchanged(case.weight, reference.weight),
+        "bias": unchanged(case.bias, reference.bias),
+    }
+
+
+def _aliases_input(output: torch.Tensor, case: SimpleNamespace) -> dict[str, bool]:
+    aliases = {}
+    for name in ("x", "residual", "weight", "bias"):
+        tensor = getattr(case, name)
+        aliases[name] = bool(
+            tensor is not None and torch._C._is_alias_of(output, tensor)
+        )
+    return aliases
 
 
 def probe_callable(
@@ -176,27 +226,29 @@ def probe_callable(
         "affine_supported": False,
         "cases": [],
     }
-    all_post = True
-    all_not_pre = True
-    all_requirements = True
-    all_affine = True
-    saw_affine_execution = False
-    saw_signature_mismatch = False
-    saw_runtime_failure = False
-    executed_cases = 0
+    affine_cases = sum(case.affine for case in cases)
+    affine_ok = True
+    affine_executed = 0
+    saw_affine_signature_mismatch = False
+    saw_affine_runtime_failure = False
+    saw_affine_output_contract_failure = False
+    saw_executed_case = False
+    saw_numerical_failure = False
     for case in cases:
         case_record: dict[str, Any] = {
             "name": case.name,
             "affine": case.affine,
             "input": _tensor_description(case.x),
         }
+        reference = _reference_case(case)
+        post, pre = _references(reference)
         try:
             args, kwargs = binder(case)
         except ValueError as error:
             case_record["status"] = "signature_mismatch"
             case_record["error"] = str(error)
             record["cases"].append(case_record)
-            saw_signature_mismatch = True
+            saw_affine_signature_mismatch |= case.affine
             continue
         try:
             output, output_index = _select_tensor_output(candidate(*args, **kwargs))
@@ -205,67 +257,72 @@ def probe_callable(
             case_record["error_type"] = type(error).__name__
             case_record["error"] = str(error)
             record["cases"].append(case_record)
-            saw_runtime_failure = True
+            saw_affine_runtime_failure |= case.affine
             continue
 
-        post, pre = _references(case)
-        executed_cases += 1
-        requirements_match, requirements = _requirements_match(output, post)
-        post_comparison = _comparison(output, post)
-        pre_comparison = _comparison(output, pre)
-        case_record.update(
-            {
-                "status": "executed",
-                "semantic_status": (
-                    "accepted"
-                    if (
-                        post_comparison["matches"]
-                        and not pre_comparison["matches"]
-                        and requirements_match
-                    )
-                    else "numerical_failure"
-                ),
-                "output": _tensor_description(output),
-                "selected_output_index": output_index,
-                "post_reference": _tensor_description(post),
-                "comparison": {"post": post_comparison, "pre": pre_comparison},
-                "requirements": requirements,
-            }
-        )
-        record["cases"].append(case_record)
-        all_post &= post_comparison["matches"]
-        all_not_pre &= not pre_comparison["matches"]
-        all_requirements &= requirements_match
-        if case.affine:
-            saw_affine_execution = True
-            all_affine &= post_comparison["matches"] and requirements_match
+        try:
+            input_integrity = _input_integrity(case, reference)
+            aliases_input = _aliases_input(output, case)
+            requirements_match, requirements = _requirements_match(output, post)
+            post_comparison = _comparison(output, post)
+            pre_comparison = _comparison(output, pre)
+            semantic_match = (
+                post_comparison["matches"]
+                and not pre_comparison["matches"]
+                and requirements_match
+                and all(input_integrity.values())
+                and not any(aliases_input.values())
+            )
+            case_record.update(
+                {
+                    "status": "executed",
+                    "semantic_status": (
+                        "accepted" if semantic_match else "numerical_failure"
+                    ),
+                    "input_integrity": input_integrity,
+                    "aliases_input": aliases_input,
+                    "output": _tensor_description(output),
+                    "selected_output_index": output_index,
+                    "post_reference": _tensor_description(post),
+                    "comparison": {"post": post_comparison, "pre": pre_comparison},
+                    "requirements": requirements,
+                }
+            )
+        except Exception as error:
+            case_record.update(
+                {
+                    "status": "output_contract_failure",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+            )
+            record["cases"].append(case_record)
+            saw_affine_output_contract_failure |= case.affine
+            continue
 
-    record["affine_supported"] = saw_affine_execution and all_affine
+        record["cases"].append(case_record)
+        saw_executed_case = True
+        saw_numerical_failure |= not semantic_match
+        if case.affine:
+            affine_executed += 1
+            affine_ok &= semantic_match
+
+    record["affine_supported"] = affine_executed == affine_cases and affine_ok
     record["semantic_status"] = (
         "accepted"
-        if (
-            executed_cases == len(cases)
-            and all_post
-            and all_not_pre
-            and all_requirements
-            and record["affine_supported"]
-        )
-        else "numerical_failure" if executed_cases else "not_evaluated"
+        if record["affine_supported"]
+        else "numerical_failure" if saw_executed_case else "not_evaluated"
     )
-    if saw_runtime_failure:
-        record["status"] = "runtime_failure"
-    elif saw_signature_mismatch:
-        record["status"] = "signature_mismatch"
-    elif (
-        executed_cases == len(cases)
-        and all_post
-        and all_not_pre
-        and all_requirements
-        and all_affine
-    ):
+    if record["affine_supported"]:
         record["status"] = "accepted"
         record["accepted"] = True
-    else:
+    elif saw_affine_output_contract_failure:
+        record["status"] = "output_contract_failure"
+    elif saw_affine_runtime_failure:
+        record["status"] = "runtime_failure"
+    elif saw_affine_signature_mismatch:
+        record["status"] = "signature_mismatch"
+    elif saw_numerical_failure:
         record["status"] = "numerical_failure"
     return record
 
@@ -483,8 +540,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="npu:0")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--source-revision")
-    parser.add_argument("--source-worktree")
+    parser.add_argument("--source-revision", required=True)
+    parser.add_argument("--source-worktree", required=True)
     args = parser.parse_args()
     report = run_probe(args.device, args.source_revision, args.source_worktree)
     artifact_sha256 = _write_report(report, args.output)
