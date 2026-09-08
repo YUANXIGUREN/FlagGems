@@ -146,15 +146,20 @@ def _load_ascend_post_layernorm():
     return module
 
 
-class _NpuMetadata:
+class _NpuMetadata(torch.Tensor):
     """Keep real CPU tensor metadata, replacing only the unavailable device."""
+
+    @staticmethod
+    def __new__(cls, tensor, index=0):
+        return torch.Tensor._make_subclass(cls, tensor, tensor.requires_grad)
 
     def __init__(self, tensor, index=0):
         self.tensor = tensor
-        self.device = SimpleNamespace(type="npu", index=index)
+        self._device = SimpleNamespace(type="npu", index=index)
 
-    def __getattr__(self, name):
-        return getattr(self.tensor, name)
+    @property
+    def device(self):
+        return self._device
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
@@ -174,6 +179,56 @@ def test_ascend_fast_guard_accepts_supported_inference(dtype, width, affine):
             weight if "weight" == affine or affine == "both" else None,
             bias if "bias" == affine or affine == "both" else None,
         )
+
+
+@pytest.mark.parametrize("argument", ["x", "residual", "weight", "bias"])
+def test_ascend_guard_rejects_nontensors_before_metadata_access(argument):
+    backend = _load_ascend_post_layernorm()
+    x = _NpuMetadata(torch.empty((2, 4)))
+    arguments = dict(x=x, residual=x, weight=None, bias=None)
+    arguments[argument] = 1.0
+    with torch.no_grad():
+        assert not backend._can_use_fast_path(normalized_shape=(4,), **arguments)
+
+
+@pytest.mark.parametrize("argument", ["weight", "bias"])
+def test_ascend_guard_rejects_affine_metadata_impostor(argument):
+    backend = _load_ascend_post_layernorm()
+    x = _NpuMetadata(torch.empty((2, 4)))
+    affine = SimpleNamespace(
+        shape=(4,), dtype=x.dtype, device=x.device, is_contiguous=lambda: True
+    )
+    with torch.no_grad():
+        assert not backend._can_use_fast_path(x, x, (4,), **{argument: affine})
+
+
+def test_ascend_guard_rejects_bool_normalized_dimension():
+    backend = _load_ascend_post_layernorm()
+    x = _NpuMetadata(torch.empty((2, 1)))
+    with torch.no_grad():
+        assert not backend._can_use_fast_path(x, x, (True,))
+
+
+@pytest.mark.parametrize("residual", [1, 0.5])
+def test_ascend_scalar_residual_preserves_composition(residual):
+    backend = _load_ascend_post_layernorm()
+    device = flag_gems.device if flag_gems.device == "npu" else "cpu"
+    x = torch.randn((2, 4), device=device)
+    with torch.no_grad():
+        expected = torch.layer_norm(x, (4,)) + residual
+        actual = backend.post_layer_norm_residual(x, residual, (4,))
+    torch.testing.assert_close(actual, expected)
+
+
+def test_ascend_bool_normalized_dimension_preserves_torch_error():
+    backend = _load_ascend_post_layernorm()
+    device = flag_gems.device if flag_gems.device == "npu" else "cpu"
+    x = torch.randn((2, 1), device=device)
+    with torch.no_grad():
+        with pytest.raises(TypeError) as expected:
+            torch.layer_norm(x, (True,)) + x
+        with pytest.raises(TypeError, match=re.escape(str(expected.value))):
+            backend.post_layer_norm_residual(x, x, (True,))
 
 
 @pytest.mark.parametrize(
@@ -363,3 +418,49 @@ def test_ascend_fallback_preserves_composition(case):
             actual_grad = torch.autograd.grad(actual.sum(), x, retain_graph=True)[0]
             expected_grad = torch.autograd.grad(expected.sum(), x)[0]
             torch.testing.assert_close(actual_grad, expected_grad)
+
+
+def _rounding_boundary_inputs(dtype, case, device):
+    x = torch.tensor([[-1.0, 1.0]], dtype=dtype, device=device)
+    if case == "cancellation":
+        magnitude = 10000.0 if dtype == torch.float16 else 1024.0
+        weight = torch.ones(2, dtype=dtype, device=device)
+        bias = torch.full((2,), magnitude, dtype=dtype, device=device)
+        residual = torch.full_like(x, -magnitude)
+    else:
+        maximum = torch.finfo(dtype).max
+        # BF16's overflow-rounding interval still lies inside the FP32 range.
+        scale = maximum if dtype == torch.float16 else maximum / 256
+        weight = torch.full((2,), scale, dtype=dtype, device=device)
+        bias = torch.full((2,), maximum, dtype=dtype, device=device)
+        residual = torch.tensor([[0.0, -maximum]], dtype=dtype, device=device)
+    return x, residual, weight, bias
+
+
+@pytest.mark.skipif(flag_gems.device != "npu", reason="requires Ascend NPU")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("case", ["cancellation", "overflow"])
+def test_ascend_rounds_layernorm_before_residual_add(monkeypatch, dtype, case):
+    import sys
+
+    backend = sys.modules[flag_gems.post_layer_norm_residual.__module__]
+    assert "_ascend.fused.post_layernorm_residual" in backend.__name__
+
+    def unexpected_fallback(*args, **kwargs):
+        pytest.fail("rounding-boundary case must exercise the Ascend kernel")
+
+    monkeypatch.setattr(backend, "common_post_layer_norm_residual", unexpected_fallback)
+    x, residual, weight, bias = _rounding_boundary_inputs(dtype, case, flag_gems.device)
+    with torch.no_grad():
+        expected = torch.layer_norm(x, (2,), weight, bias, 1e-5) + residual
+        actual = flag_gems.post_layer_norm_residual(
+            x, residual, (2,), weight, bias, 1e-5
+        )
+    torch.testing.assert_close(torch.isfinite(actual), torch.isfinite(expected))
+    torch.testing.assert_close(torch.isposinf(actual), torch.isposinf(expected))
+    torch.testing.assert_close(torch.isneginf(actual), torch.isneginf(expected))
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    if case == "cancellation":
+        torch.testing.assert_close(expected, torch.zeros_like(expected), atol=0, rtol=0)
+    else:
+        assert torch.isposinf(expected[0, 1])

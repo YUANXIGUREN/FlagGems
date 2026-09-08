@@ -59,6 +59,9 @@ def post_layer_norm_residual_kernel(
     if bias_ptr is not None:
         bias = tl.load(bias_ptr + cols, mask=cols < N, other=0.0).to(tl.float32)
         normalized = normalized + bias
+    # Match the materialized LayerNorm dtype boundary in Torch composition,
+    # including low-precision cancellation and overflow before residual add.
+    normalized = normalized.to(output_ptr.dtype.element_ty).to(tl.float32)
     residual = tl.load(residual_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
     output = normalized + residual
     tl.store(output_ptr + offsets, output, mask=mask)
@@ -68,6 +71,8 @@ def _can_use_fast_path(x, residual, normalized_shape, weight=None, bias=None):
     # The fused kernel has no backward implementation. Keep grad-enabled calls
     # on the composition even when the current inputs do not require gradients.
     if torch.is_grad_enabled():
+        return False
+    if not isinstance(x, torch.Tensor) or not isinstance(residual, torch.Tensor):
         return False
     if (
         x.device.type != "npu"
@@ -86,7 +91,10 @@ def _can_use_fast_path(x, residual, normalized_shape, weight=None, bias=None):
     if (
         not normalized_shape
         or len(normalized_shape) > x.ndim
-        or any(not isinstance(size, int) or size <= 0 for size in normalized_shape)
+        or any(
+            not isinstance(size, int) or isinstance(size, bool) or size <= 0
+            for size in normalized_shape
+        )
         or tuple(x.shape[-len(normalized_shape) :]) != normalized_shape
         or math.prod(normalized_shape) > 4096
     ):
@@ -94,7 +102,8 @@ def _can_use_fast_path(x, residual, normalized_shape, weight=None, bias=None):
     return all(
         tensor is None
         or (
-            getattr(tensor, "shape", None) == normalized_shape
+            isinstance(tensor, torch.Tensor)
+            and tensor.shape == normalized_shape
             and tensor.dtype == x.dtype
             and tensor.device == x.device
             and tensor.is_contiguous()
