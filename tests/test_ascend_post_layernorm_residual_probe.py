@@ -19,7 +19,6 @@ from types import SimpleNamespace
 
 import torch
 
-
 PROBE_PATH = (
     Path(__file__).parents[1]
     / "tools"
@@ -29,7 +28,9 @@ PROBE_PATH = (
 
 
 def _load_probe_module():
-    spec = importlib.util.spec_from_file_location("ascend_post_layernorm_probe", PROBE_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "ascend_post_layernorm_probe", PROBE_PATH
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -44,7 +45,9 @@ def _add_then_layer_norm(x, residual, normalized_shape, weight, bias, eps):
     return torch.layer_norm(x + residual, normalized_shape, weight, bias, eps)
 
 
-def _mutating_post_layer_norm_residual(x, residual, normalized_shape, weight, bias, eps):
+def _mutating_post_layer_norm_residual(
+    x, residual, normalized_shape, weight, bias, eps
+):
     output = _post_layer_norm_residual(x, residual, normalized_shape, weight, bias, eps)
     residual.add_(1)
     return output
@@ -71,7 +74,9 @@ def _torch_npu_module(available):
         def get_soc_version():
             return 1
 
-    return SimpleNamespace(__version__="test", __file__="/tmp/torch_npu.py", npu=FakeNpu())
+    return SimpleNamespace(
+        __version__="test", __file__="/tmp/torch_npu.py", npu=FakeNpu()
+    )
 
 
 def test_schema_filter_requires_layer_norm_and_add_or_residual():
@@ -95,7 +100,14 @@ def test_probe_records_schema_and_both_order_comparisons_for_post_semantics():
         candidate=_post_layer_norm_residual,
         cases=probe.make_cases(device="cpu"),
         binder=lambda case: (
-            (case.x, case.residual, case.normalized_shape, case.weight, case.bias, case.eps),
+            (
+                case.x,
+                case.residual,
+                case.normalized_shape,
+                case.weight,
+                case.bias,
+                case.eps,
+            ),
             {},
         ),
     )
@@ -122,7 +134,14 @@ def test_probe_rejects_add_then_layer_norm_even_when_the_name_is_plausible():
         candidate=_add_then_layer_norm,
         cases=probe.make_cases(device="cpu"),
         binder=lambda case: (
-            (case.x, case.residual, case.normalized_shape, case.weight, case.bias, case.eps),
+            (
+                case.x,
+                case.residual,
+                case.normalized_shape,
+                case.weight,
+                case.bias,
+                case.eps,
+            ),
             {},
         ),
     )
@@ -147,7 +166,14 @@ def test_probe_continues_to_safely_callable_affine_cases_after_nonaffine_mismatc
             (_ for _ in ()).throw(ValueError("affine parameter required"))
             if not case.affine
             else (
-                (case.x, case.residual, case.normalized_shape, case.weight, case.bias, case.eps),
+                (
+                    case.x,
+                    case.residual,
+                    case.normalized_shape,
+                    case.weight,
+                    case.bias,
+                    case.eps,
+                ),
                 {},
             )
         ),
@@ -156,9 +182,7 @@ def test_probe_continues_to_safely_callable_affine_cases_after_nonaffine_mismatc
     assert result["status"] == "numerical_failure"
     assert len(result["cases"]) == 6
     assert all(
-        case["status"] == "executed"
-        for case in result["cases"]
-        if case["affine"]
+        case["status"] == "executed" for case in result["cases"] if case["affine"]
     )
 
 
@@ -174,7 +198,14 @@ def test_probe_accepts_exact_affine_primitive_when_nonaffine_schema_binding_is_u
             (_ for _ in ()).throw(ValueError("affine parameter required"))
             if not case.affine
             else (
-                (case.x, case.residual, case.normalized_shape, case.weight, case.bias, case.eps),
+                (
+                    case.x,
+                    case.residual,
+                    case.normalized_shape,
+                    case.weight,
+                    case.bias,
+                    case.eps,
+                ),
                 {},
             )
         ),
@@ -194,14 +225,23 @@ def test_probe_rejects_candidate_that_mutates_a_reference_input():
         candidate=_mutating_post_layer_norm_residual,
         cases=probe.make_cases(device="cpu"),
         binder=lambda case: (
-            (case.x, case.residual, case.normalized_shape, case.weight, case.bias, case.eps),
+            (
+                case.x,
+                case.residual,
+                case.normalized_shape,
+                case.weight,
+                case.bias,
+                case.eps,
+            ),
             {},
         ),
     )
 
     assert result["status"] == "numerical_failure"
     assert all(case["input_integrity"]["residual"] is False for case in result["cases"])
-    assert all(case["semantic_status"] == "numerical_failure" for case in result["cases"])
+    assert all(
+        case["semantic_status"] == "numerical_failure" for case in result["cases"]
+    )
 
 
 def test_probe_records_fail_closed_output_contract_failure_for_unsupported_layout():
@@ -213,7 +253,14 @@ def test_probe_records_fail_closed_output_contract_failure_for_unsupported_layou
         candidate=_sparse_post_layer_norm_residual,
         cases=probe.make_cases(device="cpu"),
         binder=lambda case: (
-            (case.x, case.residual, case.normalized_shape, case.weight, case.bias, case.eps),
+            (
+                case.x,
+                case.residual,
+                case.normalized_shape,
+                case.weight,
+                case.bias,
+                case.eps,
+            ),
             {},
         ),
     )
@@ -263,7 +310,9 @@ def test_discovery_failure_is_inconclusive_and_never_authorizes_triton(monkeypat
     assert report["triton_authorized"] is False
 
 
-def test_cli_writes_partial_inconclusive_artifact_and_returns_nonzero(monkeypatch, tmp_path, capsys):
+def test_cli_writes_partial_inconclusive_artifact_and_returns_nonzero(
+    monkeypatch, tmp_path, capsys
+):
     probe = _load_probe_module()
     output = tmp_path / "partial.json"
     partial = {

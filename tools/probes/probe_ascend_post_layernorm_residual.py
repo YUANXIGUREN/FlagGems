@@ -35,7 +35,6 @@ from typing import Any, Callable
 
 import torch
 
-
 EPS = 1e-5
 DTYPES = (torch.float32, torch.float16, torch.bfloat16)
 X_NAMES = {"self", "input", "input_x", "x", "x1"}
@@ -105,9 +104,12 @@ def make_cases(device: str | torch.device) -> list[SimpleNamespace]:
 
 
 def _references(case: SimpleNamespace) -> tuple[torch.Tensor, torch.Tensor]:
-    post = torch.layer_norm(
-        case.x, case.normalized_shape, case.weight, case.bias, case.eps
-    ) + case.residual
+    post = (
+        torch.layer_norm(
+            case.x, case.normalized_shape, case.weight, case.bias, case.eps
+        )
+        + case.residual
+    )
     pre = torch.layer_norm(
         case.x + case.residual,
         case.normalized_shape,
@@ -252,7 +254,9 @@ def probe_callable(
             continue
         try:
             output, output_index = _select_tensor_output(candidate(*args, **kwargs))
-        except Exception as error:  # Runtime errors are evidence, not a fallback signal.
+        except (
+            Exception
+        ) as error:  # Runtime errors are evidence, not a fallback signal.
             case_record["status"] = "runtime_failure"
             case_record["error_type"] = type(error).__name__
             case_record["error"] = str(error)
@@ -336,7 +340,9 @@ def _argument_type(argument: Any) -> str:
     return str(getattr(argument, "type", ""))
 
 
-def _bind_schema(schema: Any, case: SimpleNamespace) -> tuple[tuple[Any, ...], dict[str, Any]]:
+def _bind_schema(
+    schema: Any, case: SimpleNamespace
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Bind only explicit, stable Torch-NPU argument conventions.
 
     Unknown required parameters intentionally make the candidate ineligible.
@@ -390,7 +396,11 @@ def _resolve_callable(schema: Any) -> Callable[..., Any]:
 def _schema_records() -> list[Any]:
     schemas = torch._C._jit_get_all_schemas()
     return sorted(
-        (schema for schema in schemas if is_plausible_schema(_schema_operation_name(schema))),
+        (
+            schema
+            for schema in schemas
+            if is_plausible_schema(_schema_operation_name(schema))
+        ),
         key=lambda schema: (schema.name, getattr(schema, "overload_name", "")),
     )
 
@@ -412,7 +422,9 @@ def _public_api_records(module: Any, module_name: str) -> list[dict[str, Any]]:
             {
                 "name": f"{module_name}.{name}",
                 "signature": signature,
-                "documentation": documentation.splitlines()[0] if documentation else None,
+                "documentation": (
+                    documentation.splitlines()[0] if documentation else None
+                ),
             }
         )
     return records
@@ -505,9 +517,7 @@ def run_probe(
     try:
         runtime = _runtime_identity(torch_npu)
         public_torch_npu_apis = _public_api_records(torch_npu, "torch_npu")
-        public_torch_npu_npu_apis = _public_api_records(
-            torch_npu.npu, "torch_npu.npu"
-        )
+        public_torch_npu_npu_apis = _public_api_records(torch_npu.npu, "torch_npu.npu")
     except Exception as error:
         return _inconclusive_report(
             source_revision=source_revision,
@@ -577,7 +587,11 @@ def run_probe(
         "probe_status": "complete",
         "probe_complete": True,
         "triton_authorized": not accepted,
-        "reason": "validated_post_semantic_primitive" if accepted else "no_validated_post_semantic_primitive",
+        "reason": (
+            "validated_post_semantic_primitive"
+            if accepted
+            else "no_validated_post_semantic_primitive"
+        ),
         "runtime": runtime,
         "schema_candidates": records,
         "public_torch_npu_apis": public_torch_npu_apis,
