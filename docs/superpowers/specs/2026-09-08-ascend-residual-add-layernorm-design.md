@@ -1,4 +1,4 @@
-# Ascend 910C Residual Add + LayerNorm Optimization Design
+# Ascend 910C Post-LayerNorm Residual Optimization Design
 
 ## Status and scope
 
@@ -9,7 +9,7 @@ This design starts from FlagGems commit
 The work has two gates:
 
 1. reproduce the final seven-operator GraphCast profile and prove that the
-   residual-add/LayerNorm sequence has enough end-to-end impact;
+   LayerNorm/residual-add sequence has enough end-to-end impact;
 2. only after that proof, add the smallest model-independent fused path and
    validate it against the unfused Torch composition.
 
@@ -35,8 +35,11 @@ continuing to tune AddMM.
 
 The 40-step dispatch record contains 6,506 `add` calls and 4,859
 `native_layer_norm` calls. Those counts motivate the fusion hypothesis but do
-not prove adjacency or savings. The profile and ablation gates below provide
-that proof.
+not prove adjacency or savings. Source inspection establishes that the
+single-consumer node-update path computes `layer_norm(x) + residual` through
+`GoogleSmallGraphNet._apply_mlp_with_layer_norm_residual`; the edge-update path
+is deliberately excluded because its delta has another consumer. The profile
+and ablation gates below quantify the eligible subset and its cost.
 
 ## Phase 1: final-source profile and ablation
 
@@ -58,7 +61,7 @@ measurements:
 
 The instrumented run must answer:
 
-- how many `add` results flow directly into LayerNorm;
+- how many LayerNorm outputs are consumed only by the following residual add;
 - their shapes, dtypes, strides, normalized shape, epsilon and affine use;
 - device time and launch count for the pair;
 - materialized intermediate bytes;
@@ -72,7 +75,7 @@ upstream FlagGems dispatch path.
 The proposed mathematical contract is:
 
 ```python
-residual_add_layer_norm(
+post_layer_norm_residual(
     x,
     residual,
     normalized_shape,
@@ -80,15 +83,19 @@ residual_add_layer_norm(
     bias=None,
     eps=1e-5,
 ) == torch.nn.functional.layer_norm(
-    x + residual,
+    x,
     normalized_shape,
     weight,
     bias,
     eps,
-)
+) + residual
 ```
 
-The output has the broadcasted add shape and input dtype. The initial fast
+This is intentionally different from Skip-LayerNorm, whose contract is
+`layer_norm(x + residual)`. Reusing that operator would change GraphCast's
+mathematics and is forbidden.
+
+The output has the residual-add shape and input dtype. The initial fast
 path requires `x` and `residual` to have identical shape, dtype and device;
 the normalized dimensions must be a contiguous trailing region; affine
 parameters, when present, must match `normalized_shape`.
@@ -109,19 +116,22 @@ proven expression.
 ### A. Ascend vendor fused primitive (preferred when available)
 
 Probe the installed Torch-NPU/CANN runtime for a primitive that computes
-residual addition and LayerNorm in one supported operation. This has the best
+LayerNorm followed by residual addition in one supported operation. This has the best
 chance of keeping AiCore/CANN code generation and low launch overhead.
 
 Use it only when its numerical contract, optional affine parameters and layout
-semantics match the public wrapper. If no matching primitive exists, this
-option is rejected rather than emulated with two vendor calls.
+semantics match the public wrapper. Common `add_layer_norm`/Skip-LayerNorm
+primitives perform the add before normalization and therefore do not qualify.
+If no matching primitive exists, this option is rejected rather than emulated
+with two vendor calls.
 
 ### B. Ascend Triton one-pass row kernel
 
 For a trailing normalized axis, one program or cooperative program group owns
-one row: it loads `x` and `residual`, forms the sum in registers, accumulates
-mean and variance in FP32, normalizes, applies affine parameters and stores the
-output once. Configuration is selected from normalized width and row count.
+one row: it loads `x`, accumulates mean and variance in FP32, normalizes,
+applies affine parameters, adds `residual` immediately before the store, and
+writes the output once. Configuration is selected from normalized width and
+row count.
 
 This removes the intermediate tensor and one launch, but must beat the current
 vendor composition on real 910C shapes before it is retained.
