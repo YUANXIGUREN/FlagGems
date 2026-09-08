@@ -24,6 +24,32 @@ import torch
 import flag_gems
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_public_benchmark_inputs_match_post_composition(dtype):
+    # Exercise every generated benchmark input, including future additions.
+    from benchmark.test_post_layer_norm_residual import public_inputs, torch_op
+
+    device = flag_gems.device
+    count = 0
+    with torch.no_grad():
+        for _, args in public_inputs(dtype, device):
+            x, residual, normalized_shape, weight, bias, eps = args
+            expected = (
+                torch.layer_norm(x, normalized_shape, weight, bias, eps) + residual
+            )
+            torch.testing.assert_close(torch_op(*args), expected)
+            actual = flag_gems.post_layer_norm_residual(*args)
+            tolerance = {
+                torch.float32: 1e-5,
+                torch.float16: 8e-3,
+                torch.bfloat16: 6e-2,
+            }[dtype]
+            torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+            assert actual.shape == expected.shape and actual.dtype == dtype
+            count += 1
+    assert count > 0
+
+
 def _make_affine(normalized_shape, dtype, affine):
     if not affine:
         return None, None
