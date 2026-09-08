@@ -89,12 +89,16 @@ def _can_use_contiguous_suffix_path(inp, dim, index, src):
     )
 
 
+# MetaX Triton 3.1 cannot reliably restore a mutated output while replay-mode
+# autotuning captures these atomic kernels. Event timing keeps the original
+# multi-config search, while making restore_value effective between trials.
 @libentry()
 @libtuner(
     configs=runtime.get_tuned_config("index_add_contiguous_suffix_tile"),
     key=["row_count", "suffix_size"],
     strategy=["log", "log"],
     restore_value=["out"],
+    benchmark_mode="event",
     warmup=5,
     rep=10,
 )
@@ -133,6 +137,7 @@ def _index_add_contiguous_suffix_tile_kernel(
     key=["total_count", "suffix_size"],
     strategy=["log", "log"],
     restore_value=["out"],
+    benchmark_mode="event",
     warmup=5,
     rep=10,
 )
@@ -176,6 +181,7 @@ def _index_add_contiguous_suffix_flat_kernel(
     key=["total_count", "suffix_size"],
     strategy=["log", "log"],
     restore_value=["out"],
+    benchmark_mode="event",
     warmup=5,
     rep=10,
 )

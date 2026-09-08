@@ -20,6 +20,8 @@ import triton.language as tl
 
 from flag_gems import runtime
 from flag_gems.ops.index_add import _validate_index_add_args
+from flag_gems.ops.index_add import index_add as _common_index_add
+from flag_gems.ops.index_add import index_add_ as _common_index_add_
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import dim_compress, libentry
 from flag_gems.utils import triton_lang_extension as ext
@@ -204,6 +206,10 @@ def index_add(inp, dim, index, src, alpha=1):
     dim = _validate_index_add_args(inp, dim, index, src)
     if src.numel() == 0:
         return inp.clone(memory_format=torch.contiguous_format)
+    # Triton 3.1 on MThreads cannot lower BF16 atomic_add. The common
+    # implementation accumulates BF16 inputs in FP32 before casting back.
+    if inp.dtype == torch.bfloat16:
+        return _common_index_add(inp, dim, index, src, alpha)
 
     use_contiguous_suffix_path = _can_use_contiguous_suffix_path(
         inp, dim, index, src
@@ -272,6 +278,8 @@ def index_add_(inp, dim, index, src, alpha=1):
             "input overlaps with source or index; clone the overlapping tensor "
             "before calling index_add_"
         )
+    if inp.dtype == torch.bfloat16:
+        return _common_index_add_(inp, dim, index, src, alpha)
 
     use_contiguous_suffix_path = _can_use_contiguous_suffix_path(
         inp, dim, index, src
