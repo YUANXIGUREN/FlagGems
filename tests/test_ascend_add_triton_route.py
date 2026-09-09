@@ -139,6 +139,13 @@ def test_ascend_add_source_has_only_triton_or_common_routes():
     assert "return _common_add(A, B, alpha=alpha)" in source
 
 
+def test_ascend_add_emits_the_standard_dispatch_record_marker():
+    source = SOURCE_PATH.read_text()
+
+    assert source.count('logger.debug("GEMS ADD")') == 2
+    assert "GEMS_ASCEND ADD_" not in source
+
+
 def test_ascend_ops_exports_functional_add():
     source = OPS_INIT_PATH.read_text()
 

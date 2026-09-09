@@ -240,9 +240,9 @@ def _launch_suffix_add(A, B, alpha):
 def add(A, B, *, alpha=1):
     route = explain_ascend_add_route(A, B)
     if route == "flat":
-        logger.debug("GEMS_ASCEND ADD_FLAT")
+        logger.debug("GEMS ADD")
         return _launch_flat_add(A, B, alpha)
     if route == "suffix_strided":
-        logger.debug("GEMS_ASCEND ADD_SUFFIX")
+        logger.debug("GEMS ADD")
         return _launch_suffix_add(A, B, alpha)
     return _common_add(A, B, alpha=alpha)
