@@ -227,6 +227,65 @@ If even validated fusion cannot meet the target, the result is reported as a
 measured limitation with the remaining hotspot; Native redispatch is not
 reintroduced to manufacture a passing MFU.
 
+## GraphCast evaluation source and metric provenance
+
+Formal correctness and MFU evaluation uses
+`ZYX223/ai4s_graphcast` branch `zyx/flaggems-profile-routing`, pinned to commit
+`3e435216adb7af56a32e02a4a8490dde3d405eb0`.  A moving branch name by itself
+is not sufficient provenance.  Every report must record this commit, the
+working-tree diff hash, and the SHA256 of both evaluation entry points:
+
+- `ai4s/graphcast/scripts/inference/run_operational_40step_inference.py`
+  (pinned SHA256
+  `2c839ecc83cd85e1cb14715624607ec5318c5aa5a0fbc46eaef469ee1d0d4f60`);
+- `ai4s/graphcast/scripts/inference/diagnose_inference.py` (base SHA256
+  `2ddf0938bc59a7b8a8c3f338c067746e4f359d568da23d689562a2036bcad9c7`).
+
+The three target environments may require descendant compatibility commits
+`b9cade41078ac87dd6912ec2bd295999e4c4d97e` and
+`f74b909565bc7f70a0394bc37d7a0a5efc317970` to open NetCDF timedelta metadata
+with their installed xarray versions.  These patches change dataset decoding
+compatibility only; they do not change the numerical metric, threshold,
+aggregation, reference qualification, E2E timer, FLOP count, or MFU formula.
+When both are used, the compatible diagnostic SHA256 is
+`d04fd5a90ee6eebff477d0c98417ebd94c436b376b187998f8e2f239e38e10e6`;
+both commits and the resulting diff/script hashes are recorded.
+
+The fixed-baseline diagnostic follows that repository's
+`scripts/inference/diagnose_inference.py` exactly:
+
+- references: independently qualified JAX FP32 and PyTorch GPU baselines;
+- variables: U, V, geopotential, temperature, specific humidity, and vertical
+  velocity at 13 pressure levels, producing 78 layer percentages;
+- per-layer percentage:
+  `mean(abs(candidate-reference)) / mean(abs(reference)) * 100` with uniform
+  spatial weighting;
+- overall: the unweighted arithmetic mean of the 78 layer percentages;
+- gates: overall and geopotential at 500 hPa are each strictly less than 5%,
+  independently against both references;
+- the worst layer is reported for diagnosis but is not a separate acceptance
+  gate.
+
+The diagnostic must report verified provenance and a qualified reference.
+`unverified_reference`, `unqualified_reference`, invalid inputs, non-finite
+output, a stale artifact hash, or missing source identities is a failure, even
+if the displayed percentages appear below 5%.
+
+MFU follows `calculate_throughput` in the pinned operational runner:
+
+```text
+useful_flops    = 28,857,094,475,776 FLOP/step * 40 steps
+effective_tflops = useful_flops / measured_e2e_seconds / 1e12
+MFU             = effective_tflops / (platform_peak_tflops * device_count)
+```
+
+The model FLOP numerator is identical across the three platforms.  The
+platform peak is 199 TFLOPS for 910C, 236.94 TFLOPS for BW3000, and 224.07
+TFLOPS for S5000; device count is one.  Warmup and compilation are excluded
+from `measured_e2e_seconds`, while all 40 dependent rollout steps and the final
+output device-to-host publication are included.  Cold-start time is reported
+separately.
+
 ## Correctness and precision gates
 
 Testing proceeds before performance measurement:
@@ -242,18 +301,19 @@ Testing proceeds before performance measurement:
 4. Source and runtime tests prove that target hot calls cannot reach the
    prohibited Native interfaces.
 5. GraphCast AddMM-only, Add-only, then seven-operator runs compare against
-   both fixed references.  Overall, Z500, and the established worst-layer
-   metrics must each remain strictly below 5%.
+   both fixed references.  Overall and Z500 must each remain strictly below
+   5%; the worst layer remains a required diagnostic field but is not a
+   separate gate.
 
 An unexplained operator failure or GraphCast diagnostic failure blocks all
 candidate performance reporting.
 
 ## Performance protocol
 
-Every platform run records the FlagGems commit, dirty-diff hash, loaded module
-paths, target source hashes, Python/Torch/Triton versions, device identity,
-precision-policy readback, cache directory, warmup count, iteration count, and
-commands.
+Every platform run records the FlagGems and GraphCast commits, both dirty-diff
+hashes, loaded module paths, target and evaluation source hashes,
+Python/Torch/Triton/xarray versions, device identity, precision-policy
+readback, cache directory, warmup count, iteration count, and commands.
 
 Three evidence layers are required:
 
