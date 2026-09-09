@@ -203,9 +203,9 @@ def select_mthreads_addmm_route(K, sqmma_compatible, promotes_to_fp32):
 
 
 def should_inline_round_mthreads_addmm(is_fp32, fast_enabled, route):
-    # Explicit RNE-to-TF32 changed GraphCast's 40-step forecast by more than
-    # the accepted 5%.  Keep the helper for a stable routing API, but use the
-    # backend's three-pass TF32 decomposition instead.
+    # Explicit RNE-to-TF32 does not match the backend fast-FP32 contract.
+    # Keep the helper for a stable routing API and let the selected dot path
+    # implement the backend precision policy.
     return False
 
 

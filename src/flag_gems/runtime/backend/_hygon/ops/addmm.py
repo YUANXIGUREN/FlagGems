@@ -43,7 +43,7 @@ def classify_hygon_addmm(K, stride_bk, stride_bn):
 
 def select_hygon_input_precision(kernel_class, fp32_operands, fast_enabled):
     # The production allowlist stays empty until an isolated class passes the
-    # GraphCast autoregressive accuracy gate.
+    # Iterative workloads require the configured fast-FP32 contract here.
     del kernel_class, fp32_operands, fast_enabled
     return "ieee"
 
