@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .adaptive_max_pool3d_backward import adaptive_max_pool3d_backward
+from .addmm import addmm, addmm_dtype, addmm_dtype_out, addmm_out
 from .any import any, any_dim, any_dims
 from .attention import (
     ScaleDotProductAttention,
@@ -113,6 +114,10 @@ from .weight_norm import (
 __all__ = [
     "_unique2",
     "adaptive_max_pool3d_backward",
+    "addmm",
+    "addmm_dtype",
+    "addmm_dtype_out",
+    "addmm_out",
     "avg_pool3d_backward",
     "broadcast_tensors",
     "broadcast_to",
