@@ -12,19 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .add_add_silu import add_add_silu
-from .cross_entropy_loss import cross_entropy_loss
-from .matmul_bias_activation import matmul_bias_activation
-from .packed_mlp import add_add_silu_addmm, silu_addmm
-from .post_layernorm_residual import post_layer_norm_residual
-from .sparse_attention import sparse_attn_triton
+from flag_gems.ops.add import add
+from flag_gems.ops.addmm import addmm
+from flag_gems.ops.silu import silu
 
-__all__ = [
-    "add_add_silu",
-    "cross_entropy_loss",
-    "matmul_bias_activation",
-    "add_add_silu_addmm",
-    "silu_addmm",
-    "post_layer_norm_residual",
-    "sparse_attn_triton",
-]
+
+def add_add_silu_addmm(
+    addend,
+    residual_a,
+    residual_b,
+    bias,
+    mat2,
+    *,
+    beta=1,
+    alpha=1,
+):
+    """Apply two ordered adds, SiLU, and AddMM with FlagGems kernels."""
+
+    activated = silu(add(addend, residual_a), residual_b)
+    return addmm(bias, activated, mat2, beta=beta, alpha=alpha)

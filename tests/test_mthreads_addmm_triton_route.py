@@ -78,6 +78,56 @@ def test_mthreads_route_never_returns_native(
 
 
 @pytest.mark.parametrize(
+    (
+        "all_fp32,grad_sensitive,m,n,k,a_contiguous,stride_bk,stride_bn,"
+        "bias_is_vector,out_contiguous,expected"
+    ),
+    [
+        (True, False, 131072, 512, 4, True, 1, 4, True, True, True),
+        (True, False, 40962, 512, 4, True, 1, 4, True, True, True),
+        (True, False, 1024, 512, 4, True, 1, 4, True, True, False),
+        (True, False, 131072, 256, 4, True, 1, 4, True, True, False),
+        (True, False, 131072, 512, 8, True, 1, 8, True, True, False),
+        (True, True, 131072, 512, 4, True, 1, 4, True, True, False),
+        (False, False, 131072, 512, 4, True, 1, 4, True, True, False),
+        (True, False, 131072, 512, 4, False, 1, 4, True, True, False),
+        (True, False, 131072, 512, 4, True, 512, 1, True, True, False),
+        (True, False, 131072, 512, 4, True, 1, 4, False, True, False),
+    ],
+)
+def test_mthreads_k4_tiled_contract_is_narrow_and_data_independent(
+    all_fp32,
+    grad_sensitive,
+    m,
+    n,
+    k,
+    a_contiguous,
+    stride_bk,
+    stride_bn,
+    bias_is_vector,
+    out_contiguous,
+    expected,
+):
+    select = _load_pure_function("can_use_mthreads_k4_tiled_contract")
+
+    assert (
+        select(
+            all_fp32,
+            grad_sensitive,
+            m,
+            n,
+            k,
+            a_contiguous,
+            stride_bk,
+            stride_bn,
+            bias_is_vector,
+            out_contiguous,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
     "is_fp32,fast_enabled,grad_sensitive,m,n,k,expected",
     [
         (True, True, False, 40962, 512, 512, True),
@@ -178,6 +228,16 @@ def test_mthreads_skinny_route_launches_a_dedicated_kernel():
     assert "addmm_skinny_k_flat_kernel[skinny_grid]" in source
 
 
+def test_mthreads_graph_shape_k4_route_uses_2d_data_reuse():
+    source = SOURCE_PATH.read_text()
+
+    assert "def addmm_skinny_k4_tiled_kernel(" in source
+    assert "def addmm_skinny_k4_tiled(" in source
+    assert "BLOCK_SIZE_M=32" in source
+    assert "BLOCK_SIZE_N=64" in source
+    assert "return addmm_skinny_k4_tiled(" in source
+
+
 @pytest.mark.skipif(
     flag_gems.vendor_name != "mthreads", reason="Moore Threads-only test"
 )
@@ -203,6 +263,33 @@ def test_mthreads_public_fp32_addmm_uses_backend_triton_route():
         torch.backends.mudnn.allow_tf32 = previous
 
     assert route == "skinny_k"
+    torch.testing.assert_close(actual, reference, rtol=2e-5, atol=2e-4)
+
+
+@pytest.mark.skipif(
+    flag_gems.vendor_name != "mthreads", reason="Moore Threads-only test"
+)
+def test_mthreads_large_k4_addmm_uses_tiled_triton_route():
+    backend = importlib.import_module(
+        "flag_gems.runtime.backend._mthreads.ops.addmm"
+    )
+    mat1 = torch.randn((40962, 4), dtype=torch.float32, device=flag_gems.device)
+    weight = torch.randn((512, 4), dtype=torch.float32, device=flag_gems.device)
+    mat2 = weight.t()
+    bias = torch.randn((512,), dtype=torch.float32, device=flag_gems.device)
+    previous = torch.backends.mudnn.allow_tf32
+    torch.backends.mudnn.allow_tf32 = False
+    try:
+        with torch.inference_mode():
+            route = backend.explain_mthreads_addmm_route(
+                bias, mat1, mat2, out=None, out_dtype=torch.float32
+            )
+            reference = torch.addmm(bias, mat1, mat2)
+            actual = backend.addmm(bias, mat1, mat2)
+    finally:
+        torch.backends.mudnn.allow_tf32 = previous
+
+    assert route == "skinny_k4_tiled"
     torch.testing.assert_close(actual, reference, rtol=2e-5, atol=2e-4)
 
 

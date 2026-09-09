@@ -34,6 +34,9 @@ TARGET_OPERATOR_PATHS = [
     REPOSITORY_ROOT / "src/flag_gems/ops/add.py",
     REPOSITORY_ROOT / "src/flag_gems/fused/addmm_silu.py",
     REPOSITORY_ROOT / "src/flag_gems/fused/add_add_silu.py",
+    REPOSITORY_ROOT / "src/flag_gems/fused/silu_addmm.py",
+    REPOSITORY_ROOT / "src/flag_gems/fused/add_add_silu_addmm.py",
+    REPOSITORY_ROOT / "src/flag_gems/fused/post_layernorm_residual.py",
     REPOSITORY_ROOT
     / "src/flag_gems/runtime/backend/_ascend/ops/addmm.py",
     REPOSITORY_ROOT / "src/flag_gems/runtime/backend/_ascend/ops/add.py",
@@ -44,6 +47,12 @@ TARGET_OPERATOR_PATHS = [
     REPOSITORY_ROOT / "src/flag_gems/runtime/backend/_hygon/ops/addmm.py",
     REPOSITORY_ROOT
     / "src/flag_gems/runtime/backend/_mthreads/ops/addmm.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_mthreads/fused/add_add_silu.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_mthreads/fused/packed_mlp.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_mthreads/fused/post_layernorm_residual.py",
     REPOSITORY_ROOT
     / "src/flag_gems/runtime/backend/_mthreads/ops/tf32_cache.py",
 ]

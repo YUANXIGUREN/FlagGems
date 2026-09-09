@@ -15,6 +15,7 @@
 from flag_gems.fused.act_quant import act_quant_triton
 from flag_gems.fused.add_rms_norm import add_rms_norm
 from flag_gems.fused.add_add_silu import add_add_silu
+from flag_gems.fused.add_add_silu_addmm import add_add_silu_addmm
 from flag_gems.fused.addmm_silu import addmm_silu
 from flag_gems.fused.apply_repetition_penalties import apply_repetition_penalties
 from flag_gems.fused.beam_search_score import beam_search_score, beam_search_score_
@@ -92,6 +93,7 @@ from flag_gems.fused.moe_sum import moe_sum
 from flag_gems.fused.mrope import mrope
 from flag_gems.fused.outer import outer
 from flag_gems.fused.pack_seq import pack_seq_triton
+from flag_gems.fused.post_layernorm_residual import post_layer_norm_residual
 from flag_gems.fused.reglu import dreglu, reglu
 from flag_gems.fused.reshape_and_cache import reshape_and_cache
 from flag_gems.fused.reshape_and_cache_flash import reshape_and_cache_flash
@@ -103,6 +105,7 @@ from flag_gems.fused.silu_and_mul_with_clamp import (
     silu_and_mul_with_clamp,
     silu_and_mul_with_clamp_out,
 )
+from flag_gems.fused.silu_addmm import silu_addmm
 from flag_gems.fused.skip_layernorm import skip_layer_norm
 from flag_gems.fused.sparse_attention import sparse_attn_triton
 from flag_gems.fused.stage_deepseek_v4_mega_moe_inputs import (
@@ -118,6 +121,7 @@ from flag_gems.fused.weight_norm import weight_norm
 
 __all__ = [
     "add_add_silu",
+    "add_add_silu_addmm",
     "addmm_silu",
     "add_rms_norm",
     "act_quant_triton",
@@ -178,6 +182,7 @@ __all__ = [
     "outer",
     "outplace_fused_experts",
     "pack_seq_triton",
+    "post_layer_norm_residual",
     "reglu",
     "reshape_and_cache",
     "reshape_and_cache_flash",
@@ -187,6 +192,7 @@ __all__ = [
     "silu_and_mul_out",
     "silu_and_mul_with_clamp",
     "silu_and_mul_with_clamp_out",
+    "silu_addmm",
     "sinkhorn_forward",
     "skip_layer_norm",
     "sparse_attn_triton",

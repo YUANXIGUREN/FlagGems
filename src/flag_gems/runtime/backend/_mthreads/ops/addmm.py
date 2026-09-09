@@ -238,6 +238,34 @@ def can_use_mthreads_tf32_sqmma_contract(
     )
 
 
+def can_use_mthreads_k4_tiled_contract(
+    all_fp32,
+    grad_sensitive,
+    M,
+    N,
+    K,
+    a_contiguous,
+    stride_bk,
+    stride_bn,
+    bias_is_vector,
+    out_contiguous,
+):
+    """Select the measured large-M, column-major K=4 Triton kernel."""
+
+    return (
+        all_fp32
+        and not grad_sensitive
+        and M >= 4096
+        and N == 512
+        and K == 4
+        and a_contiguous
+        and stride_bk == 1
+        and stride_bn == 4
+        and bias_is_vector
+        and out_contiguous
+    )
+
+
 def is_supported_sqmma_layout(tensor):
     # Tensor descriptors consume row-major tensors directly.  Non-contiguous
     # inputs stay on the pointer kernel instead of invoking an ATen copy.
@@ -269,6 +297,19 @@ def explain_mthreads_addmm_route(bias, mat1, mat2, out, out_dtype):
     grad_sensitive = torch.is_grad_enabled() and (
         bias.requires_grad or mat1.requires_grad or mat2.requires_grad
     )
+    if can_use_mthreads_k4_tiled_contract(
+        bias.dtype == mat1.dtype == mat2.dtype == torch.float32,
+        grad_sensitive,
+        M,
+        N,
+        K,
+        mat1.is_contiguous(),
+        mat2.stride(0),
+        mat2.stride(1),
+        bias.ndim == 1 and bias.shape[0] == N,
+        out is None or out.is_contiguous(),
+    ):
+        return "skinny_k4_tiled"
     if (
         bias.dtype == torch.float32
         and mat2.dtype == torch.float32
@@ -523,6 +564,108 @@ def addmm_skinny_k_kernel(
         result = accumulator * alpha + bias.to(accumulator.dtype) * beta
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     tl.store(c_ptrs, result.to(c_ptr.dtype.element_ty), mask=mask)
+
+
+@libentry()
+@triton.jit(do_not_specialize=["alpha", "beta"])
+def addmm_skinny_k4_tiled_kernel(
+    a_ptr,
+    b_ptr,
+    bias_ptr,
+    c_ptr,
+    alpha,
+    beta,
+    M,
+    N: tl.constexpr,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BETA_IS_ZERO: tl.constexpr,
+):
+    # A two-dimensional tile reuses each of the four A and B values instead
+    # of reloading them independently for every flattened output element.
+    pid = ext.program_id(0)
+    grid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    pid_m = pid // grid_n
+    pid_n = pid - pid_m * grid_n
+    rows = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    cols = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    row_mask = rows < M
+    col_mask = cols < N
+
+    a0 = tl.load(a_ptr + rows * stride_am, mask=row_mask, other=0.0)
+    a1 = tl.load(
+        a_ptr + rows * stride_am + stride_ak, mask=row_mask, other=0.0
+    )
+    a2 = tl.load(
+        a_ptr + rows * stride_am + 2 * stride_ak, mask=row_mask, other=0.0
+    )
+    a3 = tl.load(
+        a_ptr + rows * stride_am + 3 * stride_ak, mask=row_mask, other=0.0
+    )
+    b0 = tl.load(b_ptr + cols * stride_bn, mask=col_mask, other=0.0)
+    b1 = tl.load(
+        b_ptr + stride_bk + cols * stride_bn, mask=col_mask, other=0.0
+    )
+    b2 = tl.load(
+        b_ptr + 2 * stride_bk + cols * stride_bn,
+        mask=col_mask,
+        other=0.0,
+    )
+    b3 = tl.load(
+        b_ptr + 3 * stride_bk + cols * stride_bn,
+        mask=col_mask,
+        other=0.0,
+    )
+    accumulator = a0[:, None] * b0[None, :]
+    accumulator += a1[:, None] * b1[None, :]
+    accumulator += a2[:, None] * b2[None, :]
+    accumulator += a3[:, None] * b3[None, :]
+    result = alpha * accumulator
+    if not BETA_IS_ZERO:
+        bias = tl.load(bias_ptr + cols, mask=col_mask, other=0.0)
+        result += beta * bias[None, :]
+    mask = row_mask[:, None] & col_mask[None, :]
+    tl.store(
+        c_ptr + rows[:, None] * N + cols[None, :],
+        result.to(c_ptr.dtype.element_ty),
+        mask=mask,
+    )
+
+
+def addmm_skinny_k4_tiled(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
+    """Execute the measured K=4 data-reuse kernel without vendor dispatch."""
+
+    M, _ = mat1.shape
+    _, N = mat2.shape
+    if out is None:
+        out = torch.empty((M, N), dtype=mat1.dtype, device=mat1.device)
+    grid = (
+        triton.cdiv(M, 32) * triton.cdiv(N, 64),
+    )
+    with torch_device_fn.device(mat1.device):
+        addmm_skinny_k4_tiled_kernel[grid](
+            mat1,
+            mat2,
+            bias,
+            out,
+            alpha,
+            beta,
+            M,
+            N,
+            mat1.stride(0),
+            mat1.stride(1),
+            mat2.stride(0),
+            mat2.stride(1),
+            BLOCK_SIZE_M=32,
+            BLOCK_SIZE_N=64,
+            BETA_IS_ZERO=beta == 0,
+            num_warps=4,
+        )
+    return out
 
 
 @libentry()
@@ -902,6 +1045,26 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
     grad_sensitive = torch.is_grad_enabled() and (
         bias.requires_grad or mat1.requires_grad or mat2.requires_grad
     )
+    if can_use_mthreads_k4_tiled_contract(
+        bias.dtype == mat1.dtype == mat2.dtype == torch.float32,
+        grad_sensitive,
+        M,
+        N,
+        K,
+        mat1.is_contiguous(),
+        mat2.stride(0),
+        mat2.stride(1),
+        bias.ndim == 1 and bias.shape[0] == N,
+        out is None or out.is_contiguous(),
+    ):
+        return addmm_skinny_k4_tiled(
+            bias,
+            mat1,
+            mat2,
+            beta=beta,
+            alpha=alpha,
+            out=out,
+        )
     if (
         bias.dtype == torch.float32
         and mat2.dtype == torch.float32
