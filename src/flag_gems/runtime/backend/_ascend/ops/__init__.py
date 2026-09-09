@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .add import add
 from .addmm import addmm, addmm_dtype, addmm_dtype_out, addmm_out
 from .all import all, all_dim, all_dims
 from .amax import amax
@@ -31,7 +32,15 @@ from .attention import (
 from .baddbmm import baddbmm
 from .bmm import bmm
 from .cat import cat, cat_out
-from .cholesky_solve import cholesky_solve, cholesky_solve_out
+try:
+    from .cholesky_solve import cholesky_solve, cholesky_solve_out
+except ModuleNotFoundError as error:
+    missing_module = error.name or ""
+    if not (
+        missing_module == "triton.experimental.tle"
+        or missing_module.startswith("triton.experimental.tle.")
+    ):
+        raise
 from .count_nonzero import count_nonzero
 from .cummax import cummax
 from .cummin import cummin
@@ -125,6 +134,7 @@ from .zeros_like import zeros_like
 __all__ = [
     "_unique2",
     "_upsample_bicubic2d_aa",
+    "add",
     "addmm",
     "addmm_dtype",
     "addmm_dtype_out",
@@ -272,3 +282,7 @@ __all__ = [
     "zeros",
     "zeros_like",
 ]
+
+if "cholesky_solve" not in globals():
+    __all__.remove("cholesky_solve")
+    __all__.remove("cholesky_solve_out")

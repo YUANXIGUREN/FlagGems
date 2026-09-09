@@ -20,6 +20,27 @@ import flag_gems
 from . import base, consts
 
 
+class AddSuffixStridedBenchmark(base.BinaryPointwiseBenchmark):
+    def set_more_shapes(self):
+        return [(2, 31, 1), (2, 31, 13), (2, 31, 31)]
+
+    def get_input_iter(self, dtype):
+        for shape in self.shapes:
+            if len(shape) == 3 and shape[-1] in (1, 13, 31):
+                storage_shape = (*shape[:-1], 176)
+                inp1 = torch.randn(
+                    storage_shape, dtype=dtype, device=self.device
+                )[..., : shape[-1]]
+                inp2 = torch.randn(
+                    storage_shape, dtype=dtype, device=self.device
+                )[..., : shape[-1]]
+                yield inp1, inp2
+            else:
+                inp1 = base.generate_tensor_input(shape, dtype, self.device)
+                inp2 = base.generate_tensor_input(shape, dtype, self.device)
+                yield inp1, inp2
+
+
 @pytest.mark.add
 @pytest.mark.skipif(
     flag_gems.vendor_name == "tsingmicro", reason="Issue #4131: not working"
@@ -29,6 +50,19 @@ def test_add():
         op_name="add",
         torch_op=torch.add,
         dtypes=consts.FLOAT_DTYPES + consts.COMPLEX_DTYPES,
+    )
+    bench.run()
+
+
+@pytest.mark.add
+@pytest.mark.skipif(
+    flag_gems.vendor_name != "ascend", reason="Ascend suffix-strided benchmark"
+)
+def test_add_suffix_strided():
+    bench = AddSuffixStridedBenchmark(
+        op_name="add",
+        torch_op=torch.add,
+        dtypes=[torch.float32],
     )
     bench.run()
 

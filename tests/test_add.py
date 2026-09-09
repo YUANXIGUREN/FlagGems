@@ -42,6 +42,30 @@ def test_add(shape, alpha, dtype):
 
 @pytest.mark.add
 @pytest.mark.skipif(
+    flag_gems.vendor_name != "ascend", reason="Ascend suffix-strided case"
+)
+@pytest.mark.parametrize("suffix", [1, 13, 31])
+@pytest.mark.parametrize("alpha", [0, 0.5, -2])
+@pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
+def test_add_suffix_strided(suffix, alpha, dtype):
+    base1 = torch.randn(
+        (2, 31, 176), dtype=dtype, device=flag_gems.device
+    )
+    base2 = torch.randn_like(base1)
+    inp1 = base1[..., :suffix]
+    inp2 = base2[..., :suffix]
+    ref_inp1 = utils.to_reference(inp1, True)
+    ref_inp2 = utils.to_reference(inp2, True)
+
+    ref_out = torch.add(ref_inp1, ref_inp2, alpha=alpha)
+    with flag_gems.use_gems():
+        res_out = torch.add(inp1, inp2, alpha=alpha)
+
+    utils.gems_assert_close(res_out, ref_out, dtype)
+
+
+@pytest.mark.add
+@pytest.mark.skipif(
     flag_gems.vendor_name == "ascend",
     reason="Issues #3267: Ascend NPU does not support complex32 dtype",
 )
