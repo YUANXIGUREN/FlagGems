@@ -72,6 +72,7 @@ def addmm_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
+    BETA_IS_ZERO: tl.constexpr,
     HAS_K: tl.constexpr,
     IS_FP64: tl.constexpr = False,
 ):
@@ -110,19 +111,23 @@ def addmm_kernel(
             b_ptrs += BLOCK_SIZE_K * stride_bk
 
     mask = (offs_m < M)[:, None] & (offs_n < N)[None, :]
-    if BIAS_IS_VECTOR:
-        bias = tl.load(
-            i_ptr + offs_n * stride_in,
-            mask=offs_n < N,
-            other=0.0,
-        )[None, :]
-    elif BIAS_IS_SCALAR:
-        bias = tl.load(i_ptr)
+    if BETA_IS_ZERO:
+        result = accumulator * alpha
     else:
-        i_ptrs = i_ptr + offs_m[:, None] * stride_im + offs_n[None, :] * stride_in
-        bias = tl.load(i_ptrs, mask=mask, other=0.0)
-
-    result = accumulator * alpha + bias.to(accumulator.dtype) * beta
+        if BIAS_IS_VECTOR:
+            bias = tl.load(
+                i_ptr + offs_n * stride_in,
+                mask=offs_n < N,
+                other=0.0,
+            )[None, :]
+        elif BIAS_IS_SCALAR:
+            bias = tl.load(i_ptr)
+        else:
+            i_ptrs = (
+                i_ptr + offs_m[:, None] * stride_im + offs_n[None, :] * stride_in
+            )
+            bias = tl.load(i_ptrs, mask=mask, other=0.0)
+        result = accumulator * alpha + bias.to(accumulator.dtype) * beta
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     tl.store(c_ptrs, result.to(c_ptr.dtype.element_ty), mask=mask)
 
@@ -183,6 +188,7 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
             out.stride(1),
             BIAS_IS_VECTOR=bias_is_vector,
             BIAS_IS_SCALAR=bias_is_scalar,
+            BETA_IS_ZERO=beta == 0,
             HAS_K=K > 0,
             IS_FP64=mat1.dtype == torch.float64,
         )

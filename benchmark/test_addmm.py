@@ -33,7 +33,12 @@ def _input_fn(b, m, n, k, dtype, device, b_column_major):
 
 class AddmmVectorBiasBenchmark(base.BlasBenchmark):
     def set_more_shapes(self):
-        return []
+        return [
+            (1, 4096, 512, 4),
+            (1, 4096, 512, 184),
+            (1, 4096, 512, 512),
+            (1, 4096, 512, 1024),
+        ]
 
     def get_input_iter(self, dtype):
         for b, m, n, k in self.shapes:
@@ -49,6 +54,8 @@ class AddmmVectorBiasBenchmark(base.BlasBenchmark):
             "mat1": mat1.size(),
             "mat2": mat2.size(),
             "mat2_layout": ("column-major" if mat2.stride(0) == 1 else "row-major"),
+            "mat2_stride_k": mat2.stride(0),
+            "mat2_stride_n": mat2.stride(1),
         }
 
 
