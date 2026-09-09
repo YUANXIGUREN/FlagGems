@@ -42,14 +42,12 @@ def _can_use_native_fp32_add(A, B):
         and A.dtype == torch.float32
         and B.dtype == torch.float32
         and A.shape == B.shape
-        and A.is_contiguous()
-        and B.is_contiguous()
         and not (torch.is_grad_enabled() and (A.requires_grad or B.requires_grad))
     )
 
 
 def add(A, B, *, alpha=1):
     if _can_use_native_fp32_add(A, B):
-        logger.debug("GEMS_ASCEND ADD NATIVE")
+        logger.debug("GEMS ADD")
         return _native_add(A, B, alpha=alpha)
     return _common_add(A, B, alpha=alpha)

@@ -73,16 +73,12 @@ def test_ascend_public_add_uses_native_route_for_inference(shape, alpha):
 @pytest.mark.skipif(
     flag_gems.vendor_name != "ascend", reason="Ascend-only Native add routing"
 )
-@pytest.mark.parametrize("case", ["broadcast", "noncontiguous", "float16"])
+@pytest.mark.parametrize("case", ["broadcast", "float16"])
 def test_ascend_public_add_preserves_common_fallbacks(case):
     add_module = importlib.import_module(flag_gems.add.__module__)
     if case == "broadcast":
         lhs = torch.randn((2, 3, 8), dtype=torch.float32, device=flag_gems.device)
         rhs = torch.randn((1, 3, 1), dtype=torch.float32, device=flag_gems.device)
-    elif case == "noncontiguous":
-        lhs = torch.randn((2, 3, 8), dtype=torch.float32, device=flag_gems.device)
-        rhs = torch.randn((2, 8, 3), dtype=torch.float32, device=flag_gems.device)
-        rhs = rhs.transpose(1, 2)
     else:
         lhs = torch.randn((2, 3, 8), dtype=torch.float16, device=flag_gems.device)
         rhs = torch.randn_like(lhs)
@@ -93,3 +89,22 @@ def test_ascend_public_add_preserves_common_fallbacks(case):
         actual = torch.add(lhs, rhs)
 
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(
+    flag_gems.vendor_name != "ascend", reason="Ascend-only Native add routing"
+)
+def test_ascend_public_add_uses_native_route_for_same_shape_strided_input():
+    add_module = importlib.import_module(flag_gems.add.__module__)
+    base = torch.randn((2, 3, 16), dtype=torch.float32, device=flag_gems.device)
+    lhs = base[..., :8]
+    rhs = torch.randn_like(lhs.contiguous())
+    expected = torch.add(lhs, rhs)
+
+    assert not lhs.is_contiguous()
+    assert lhs.shape == rhs.shape
+    assert add_module._can_use_native_fp32_add(lhs, rhs) is True
+    with torch.no_grad(), flag_gems.use_gems():
+        actual = torch.add(lhs, rhs)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
