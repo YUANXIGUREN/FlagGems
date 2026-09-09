@@ -45,8 +45,15 @@ def test_mthreads_packed_mlp_uses_only_owned_triton_kernels():
 
     assert "def _silu_to_tf32_fp16_kernel(" in source
     assert "def _add_add_silu_to_tf32_fp16_kernel(" in source
-    assert "bits & 0xFFFFE000" in source
+    assert "ext.round_to_tf32(activated)" in source
+    assert "bits & 0xFFFFE000" not in source
+    assert source.count("tl.fdiv(") == 2
     assert "addmm_sqmma(" in source
+    assert "addmm as _mthreads_addmm" in source
+    assert "from flag_gems.ops.add import add" in source
+    assert "from flag_gems.ops.silu import silu" in source
+    assert "_common_silu_addmm" not in source
+    assert "_common_add_add_silu_addmm" not in source
     assert "from .packed_mlp import" in MTHREADS_INIT.read_text()
     for forbidden in (
         "torch.add",
@@ -70,7 +77,7 @@ def test_mthreads_packed_mlp_matches_existing_fast_fp32_sequence():
 
     expected = flag_gems.addmm(bias, flag_gems.silu(hidden), mat2)
     actual = flag_gems.silu_addmm(hidden, bias, mat2)
-    torch.testing.assert_close(actual, expected, rtol=5e-2, atol=5e-2)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
     residual_input = flag_gems.add(flag_gems.add(hidden, residual_a), residual_b)
     expected = flag_gems.addmm(bias, flag_gems.silu(residual_input), mat2)
@@ -81,4 +88,18 @@ def test_mthreads_packed_mlp_matches_existing_fast_fp32_sequence():
         bias,
         mat2,
     )
-    torch.testing.assert_close(actual, expected, rtol=5e-2, atol=5e-2)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(flag_gems.vendor_name != "mthreads", reason="MThreads only")
+def test_mthreads_packed_mlp_ineligible_shape_uses_mthreads_addmm_fallback():
+    m, n, k = 512, 83, 512
+    hidden = torch.randn((m, k), device=flag_gems.device, dtype=torch.float32)
+    weight = torch.randn((n, k), device=flag_gems.device, dtype=torch.float32)
+    mat2 = weight.t()
+    bias = torch.randn((n,), device=flag_gems.device, dtype=torch.float32)
+
+    expected = flag_gems.addmm(bias, flag_gems.silu(hidden), mat2)
+    actual = flag_gems.silu_addmm(hidden, bias, mat2)
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)

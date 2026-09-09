@@ -18,18 +18,18 @@ import torch
 import triton
 import triton.language as tl
 
-from flag_gems.fused.add_add_silu_addmm import (
-    add_add_silu_addmm as _common_add_add_silu_addmm,
-)
-from flag_gems.fused.silu_addmm import silu_addmm as _common_silu_addmm
+from flag_gems.ops.add import add
+from flag_gems.ops.silu import silu
 from flag_gems.runtime import torch_device_fn
 from flag_gems.runtime.backend._mthreads.ops.addmm import (
     _get_tf32_fp16_rhs,
+    addmm as _mthreads_addmm,
     addmm_sqmma,
     can_use_mthreads_tf32_sqmma_contract,
 )
 from flag_gems.runtime.matmul_precision import should_use_fast_float32_matmul
 from flag_gems.utils import libentry
+from flag_gems.utils import triton_lang_extension as ext
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,8 @@ def _silu_to_tf32_fp16_kernel(
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
     value = tl.load(input + offsets, mask=mask, other=0.0).to(tl.float32)
-    activated = value / (1.0 + tl.exp(-value))
-    bits = activated.to(tl.uint32, bitcast=True)
-    packed = (bits & 0xFFFFE000).to(tl.float32, bitcast=True)
+    activated = tl.fdiv(value, 1.0 + tl.exp(-value))
+    packed = ext.round_to_tf32(activated)
     tl.store(output + offsets, packed, mask=mask)
 
 
@@ -67,9 +66,8 @@ def _add_add_silu_to_tf32_fp16_kernel(
     value = value + tl.load(residual_a + offsets, mask=mask, other=0.0)
     value = value + tl.load(residual_b + offsets, mask=mask, other=0.0)
     value = value.to(tl.float32)
-    activated = value / (1.0 + tl.exp(-value))
-    bits = activated.to(tl.uint32, bitcast=True)
-    packed = (bits & 0xFFFFE000).to(tl.float32, bitcast=True)
+    activated = tl.fdiv(value, 1.0 + tl.exp(-value))
+    packed = ext.round_to_tf32(activated)
     tl.store(output + offsets, packed, mask=mask)
 
 
@@ -159,10 +157,43 @@ def _packed_addmm(input, bias, mat2, beta, alpha, residuals=()):
     )
 
 
+def _fallback_silu_addmm(input, bias, mat2, beta, alpha):
+    """Compose owned kernels while preserving MThreads AddMM routing."""
+
+    return _mthreads_addmm(
+        bias,
+        silu(input),
+        mat2,
+        beta=beta,
+        alpha=alpha,
+    )
+
+
+def _fallback_add_add_silu_addmm(
+    addend,
+    residual_a,
+    residual_b,
+    bias,
+    mat2,
+    beta,
+    alpha,
+):
+    """Compose the unfused path without escaping the vendor backend."""
+
+    activated = silu(add(add(addend, residual_a), residual_b))
+    return _mthreads_addmm(
+        bias,
+        activated,
+        mat2,
+        beta=beta,
+        alpha=alpha,
+    )
+
+
 def silu_addmm(input, bias, mat2, *, beta=1, alpha=1):
     logger.debug("GEMS_MTHREADS SILU_ADDMM_PACKED")
     if not _eligible(input, bias, mat2):
-        return _common_silu_addmm(input, bias, mat2, beta=beta, alpha=alpha)
+        return _fallback_silu_addmm(input, bias, mat2, beta, alpha)
     return _packed_addmm(input, bias, mat2, beta, alpha)
 
 
@@ -179,14 +210,14 @@ def add_add_silu_addmm(
     logger.debug("GEMS_MTHREADS ADD_ADD_SILU_ADDMM_PACKED")
     residuals = (residual_a, residual_b)
     if not _eligible(addend, bias, mat2, residuals):
-        return _common_add_add_silu_addmm(
+        return _fallback_add_add_silu_addmm(
             addend,
             residual_a,
             residual_b,
             bias,
             mat2,
-            beta=beta,
-            alpha=alpha,
+            beta,
+            alpha,
         )
     return _packed_addmm(addend, bias, mat2, beta, alpha, residuals)
 

@@ -42,6 +42,7 @@ def test_mthreads_residual_activation_is_a_single_triton_kernel():
     assert "@triton.jit" in source
     assert "def _add_add_silu_kernel(" in source
     assert "tl.exp" in source
+    assert "tl.fdiv(" in source
     assert "from .add_add_silu import add_add_silu" in FUSED_INIT.read_text()
     for forbidden in (
         "torch.add",

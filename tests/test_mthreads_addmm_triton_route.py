@@ -131,8 +131,10 @@ def test_mthreads_k4_tiled_contract_is_narrow_and_data_independent(
     "is_fp32,fast_enabled,grad_sensitive,m,n,k,expected",
     [
         (True, True, False, 40962, 512, 512, True),
-        (True, True, False, 40962, 512, 184, True),
+        (True, True, False, 40962, 512, 184, False),
         (True, True, False, 1038240, 83, 512, False),
+        (True, True, False, 40962, 512, 1024, True),
+        (True, True, False, 1038240, 512, 1024, True),
         (True, True, False, 131072, 512, 4, False),
         (True, False, False, 40962, 512, 512, False),
         (False, True, False, 40962, 512, 512, False),
@@ -152,7 +154,7 @@ def test_mthreads_tf32_sqmma_contract_is_data_independent(
 @pytest.mark.parametrize(
     "is_fp32,fast_enabled,route,expected",
     [
-        (True, True, "pointer", False),
+        (True, True, "pointer", True),
         (True, True, "skinny_k", False),
         (True, False, "pointer", False),
         (False, True, "pointer", False),
@@ -199,7 +201,7 @@ def test_mthreads_addmm_source_has_no_native_dispatch_hooks():
         assert forbidden not in source
 
 
-def test_mthreads_fp32_pointer_route_uses_native_tf32_without_materialized_copies():
+def test_mthreads_fp32_pointer_route_uses_rne_tf32_without_materialized_copies():
     source = SOURCE_PATH.read_text()
 
     assert "round_to_tf32_copy(mat1)" not in source
@@ -296,7 +298,7 @@ def test_mthreads_large_k4_addmm_uses_tiled_triton_route():
 @pytest.mark.skipif(
     flag_gems.vendor_name != "mthreads", reason="Moore Threads-only test"
 )
-def test_mthreads_fast_fp32_addmm_uses_truncated_tf32_sqmma_route():
+def test_mthreads_k184_fp32_addmm_preserves_exponent_on_pointer_route():
     backend = importlib.import_module(
         "flag_gems.runtime.backend._mthreads.ops.addmm"
     )
@@ -316,7 +318,7 @@ def test_mthreads_fast_fp32_addmm_uses_truncated_tf32_sqmma_route():
     finally:
         torch.backends.mudnn.allow_tf32 = previous
 
-    assert route == "tf32_sqmma"
+    assert route == "pointer"
     normalized_rmse = (
         (actual - reference).square().mean().sqrt()
         / reference.square().mean().sqrt().clamp_min(1e-30)

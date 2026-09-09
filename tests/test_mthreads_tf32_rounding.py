@@ -150,7 +150,7 @@ def test_round_to_tf32_copy_materializes_logical_noncontiguous_values():
 
 
 @requires_s5000
-def test_round_to_tf32_fp16_copy_matches_musa_truncation_for_representable_values():
+def test_round_to_tf32_fp16_copy_uses_standard_rne_for_representable_values():
     backend_addmm = importlib.import_module(
         "flag_gems.runtime.backend._mthreads.ops.addmm"
     )
@@ -170,14 +170,14 @@ def test_round_to_tf32_fp16_copy_matches_musa_truncation_for_representable_value
     ).reshape(2, 4).t()
     expected = torch.tensor(
         [
-            1.0,
-            -1.0,
-            1.0,
-            -1.0,
-            1.0,
-            -1.0,
             1.0009765625,
             -1.0009765625,
+            1.0,
+            -1.0,
+            1.0,
+            -1.0,
+            1.001953125,
+            -1.001953125,
         ],
         device=flag_gems.device,
         dtype=torch.float32,

@@ -151,7 +151,7 @@ def _get_rounded_tf32_rhs(mat2):
 
 
 def round_to_tf32_fp16_copy(tensor):
-    """Materialize MUSA's truncated TF32 operands in FP16 storage."""
+    """Materialize standard RNE-rounded TF32 operands in FP16 storage."""
 
     assert tensor.dtype == torch.float32
     assert tensor.ndim == 2
@@ -173,7 +173,7 @@ def round_to_tf32_fp16_copy(tensor):
             tensor.stride(0),
             tensor.stride(1),
             BLOCK_SIZE=1024,
-            TRUNCATE=True,
+            TRUNCATE=False,
         )
     return rounded
 
@@ -203,10 +203,10 @@ def select_mthreads_addmm_route(K, sqmma_compatible, promotes_to_fp32):
 
 
 def should_inline_round_mthreads_addmm(is_fp32, fast_enabled, route):
-    # Explicit RNE-to-TF32 does not match the backend fast-FP32 contract.
-    # Keep the helper for a stable routing API and let the selected dot path
-    # implement the backend precision policy.
-    return False
+    # Standard TF32 uses round-to-nearest-even.  Round pointer tiles explicitly
+    # because this backend's bare ``input_precision="tf32"`` path truncates
+    # mantissas and accumulates too much error across recurrent GraphCast steps.
+    return is_fp32 and fast_enabled and route == "pointer"
 
 
 def select_mthreads_pointer_precision(is_fp32, fast_enabled):
@@ -230,11 +230,13 @@ def can_use_mthreads_tf32_sqmma_contract(
         is_fp32
         and fast_enabled
         and not grad_sensitive
-        and M > 0
-        and N > 0
-        and K >= 16
-        and N % 8 == 0
-        and K % 8 == 0
+        # FP16 storage narrows TF32's exponent range.  Keep SQMMA on the
+        # Restrict FP16-backed SQMMA to GraphCast's measured N=512 classes and
+        # use standard RNE conversion; the recurrent diagnostic is the final
+        # guard against precision drift from the reduced exponent range.
+        and M >= 4096
+        and N == 512
+        and K in (512, 1024)
     )
 
 

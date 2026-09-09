@@ -41,7 +41,7 @@ def _add_add_silu_kernel(
     value = value + tl.load(residual_a + offsets, mask=mask, other=0.0)
     value = value + tl.load(residual_b + offsets, mask=mask, other=0.0)
     value_fp32 = value.to(tl.float32)
-    result = value_fp32 / (1.0 + tl.exp(-value_fp32))
+    result = tl.fdiv(value_fp32, 1.0 + tl.exp(-value_fp32))
     tl.store(output + offsets, result, mask=mask)
 
 
