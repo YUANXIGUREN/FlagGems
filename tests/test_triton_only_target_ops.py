@@ -32,9 +32,15 @@ REPOSITORY_ROOT = Path(__file__).parents[1]
 TARGET_OPERATOR_PATHS = [
     REPOSITORY_ROOT / "src/flag_gems/ops/addmm.py",
     REPOSITORY_ROOT / "src/flag_gems/ops/add.py",
+    REPOSITORY_ROOT / "src/flag_gems/fused/addmm_silu.py",
+    REPOSITORY_ROOT / "src/flag_gems/fused/add_add_silu.py",
     REPOSITORY_ROOT
     / "src/flag_gems/runtime/backend/_ascend/ops/addmm.py",
     REPOSITORY_ROOT / "src/flag_gems/runtime/backend/_ascend/ops/add.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_ascend/fused/addmm_silu.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_ascend/fused/add_add_silu.py",
     REPOSITORY_ROOT / "src/flag_gems/runtime/backend/_hygon/ops/addmm.py",
     REPOSITORY_ROOT
     / "src/flag_gems/runtime/backend/_mthreads/ops/addmm.py",

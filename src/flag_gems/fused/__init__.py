@@ -14,6 +14,8 @@
 
 from flag_gems.fused.act_quant import act_quant_triton
 from flag_gems.fused.add_rms_norm import add_rms_norm
+from flag_gems.fused.add_add_silu import add_add_silu
+from flag_gems.fused.addmm_silu import addmm_silu
 from flag_gems.fused.apply_repetition_penalties import apply_repetition_penalties
 from flag_gems.fused.beam_search_score import beam_search_score, beam_search_score_
 from flag_gems.fused.bf16_paged_mqa_logits import bf16_paged_mqa_logits
@@ -115,6 +117,8 @@ from flag_gems.fused.unpack_seq import unpack_seq_triton
 from flag_gems.fused.weight_norm import weight_norm
 
 __all__ = [
+    "add_add_silu",
+    "addmm_silu",
     "add_rms_norm",
     "act_quant_triton",
     "apply_repetition_penalties",

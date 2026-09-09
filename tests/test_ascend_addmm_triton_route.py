@@ -90,6 +90,15 @@ def test_grouped_dot_consumes_compile_time_input_precision():
     assert "INPUT_PRECISION=select_ascend_input_precision(" in source
 
 
+def test_addmm_silu_reuses_grouped_gemm_with_a_compile_time_epilogue():
+    source = SOURCE_PATH.read_text()
+
+    assert "FUSE_SILU: tl.constexpr" in source
+    assert "if FUSE_SILU:" in source
+    assert "def addmm_silu(" in source
+    assert "fuse_silu=True" in source
+
+
 def test_grouped_kernel_uses_addmm_owned_measured_configurations():
     source = SOURCE_PATH.read_text()
     configs = yaml.safe_load(TUNE_PATH.read_text())["addmm"]

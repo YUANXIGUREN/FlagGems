@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .add_add_silu import add_add_silu
+from .addmm_silu import addmm_silu
 from .cross_entropy_loss import cross_entropy_loss
 from .flash_mla import flash_mla
 from .fused_add_rms_norm import fused_add_rms_norm
@@ -29,6 +31,8 @@ from .skip_layernorm import skip_layer_norm
 from .sparse_attention import sparse_attn_triton
 
 __all__ = [
+    "add_add_silu",
+    "addmm_silu",
     "cross_entropy_loss",
     "apply_rotary_pos_emb",
     "flash_mla",

@@ -151,6 +151,7 @@ def addmm_kernel(
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
     BETA_IS_ZERO: tl.constexpr,
+    FUSE_SILU: tl.constexpr,
     RHS_LAYOUT: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
 ):
@@ -215,6 +216,10 @@ def addmm_kernel(
             bias += stride_im * ram[:, None] + stride_in * rbn[None, :]
             bias_tile = tl.load(bias, mask=mask, other=0.0)
         result = acc * alpha + bias_tile.to(acc.dtype) * beta
+    if FUSE_SILU:
+        # Preserve the materialized AddMM dtype boundary before applying SiLU.
+        value = result.to(C.dtype.element_ty).to(tl.float32)
+        result = value / (1.0 + tl.exp(-value))
     tl.store(C, result.to(C.dtype.element_ty), mask=mask)
 
 
@@ -250,6 +255,7 @@ def addmm_skinny_k_kernel(
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
     BETA_IS_ZERO: tl.constexpr,
+    FUSE_SILU: tl.constexpr,
     RHS_LAYOUT: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
@@ -289,10 +295,13 @@ def addmm_skinny_k_kernel(
             bias_tile = tl.load(bias_ptrs, mask=mask, other=0.0)
         result = acc * alpha + bias_tile.to(acc.dtype) * beta
     output = C + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    if FUSE_SILU:
+        value = result.to(C.dtype.element_ty).to(tl.float32)
+        result = value / (1.0 + tl.exp(-value))
     tl.store(output, result.to(C.dtype.element_ty), mask=mask)
 
 
-def _launch_addmm(bias, mat1, mat2, out, alpha, beta):
+def _launch_addmm(bias, mat1, mat2, out, alpha, beta, *, fuse_silu=False):
     M, K = mat1.shape
     _, N = mat2.shape
     # Keep row- or column-contiguous views and materialize only general strides.
@@ -351,6 +360,7 @@ def _launch_addmm(bias, mat1, mat2, out, alpha, beta):
                 BIAS_IS_VECTOR=bias_is_vector,
                 BIAS_IS_SCALAR=bias_is_scalar,
                 BETA_IS_ZERO=beta_is_zero,
+                FUSE_SILU=fuse_silu,
                 RHS_LAYOUT=rhs_layout,
             )
         return out
@@ -383,6 +393,7 @@ def _launch_addmm(bias, mat1, mat2, out, alpha, beta):
             BIAS_IS_VECTOR=bias_is_vector,
             BIAS_IS_SCALAR=bias_is_scalar,
             BETA_IS_ZERO=beta_is_zero,
+            FUSE_SILU=fuse_silu,
             RHS_LAYOUT=rhs_layout,
             INPUT_PRECISION=select_ascend_input_precision(
                 M,
@@ -405,6 +416,30 @@ def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
     N = mat2.shape[1]
     out = torch.empty((M, N), device=mat1.device, dtype=mat1.dtype)
     return _launch_addmm(bias, mat1, mat2, out, alpha, beta)
+
+
+def addmm_silu(bias, mat1, mat2, *, beta=1, alpha=1):
+    """Compute SiLU(AddMM) in the owning Triton GEMM epilogue."""
+
+    logger.debug("GEMS_ASCEND ADDMM_SILU")
+    assert mat1.shape[1] == mat2.shape[0], "Incompatible dimensions"
+    assert broadcastable_to(
+        bias.shape, (mat1.shape[0], mat2.shape[1])
+    ), "Incompatible input shape"
+    out = torch.empty(
+        (mat1.shape[0], mat2.shape[1]),
+        device=mat1.device,
+        dtype=mat1.dtype,
+    )
+    return _launch_addmm(
+        bias,
+        mat1,
+        mat2,
+        out,
+        alpha,
+        beta,
+        fuse_silu=True,
+    )
 
 
 def addmm_out(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
