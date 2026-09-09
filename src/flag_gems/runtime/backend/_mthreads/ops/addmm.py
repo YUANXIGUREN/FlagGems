@@ -24,12 +24,70 @@ from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import broadcastable_to, libentry, libtuner
 from flag_gems.utils import triton_lang_extension as ext
 
+from .tf32_cache import TF32RHSCache
+
 logger = logging.getLogger(__name__)
 
 
 EXPAND_CONFIG_FILENAME = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "addmm_mthreads_expand.yaml")
 )
+
+_TF32_RHS_CACHE = TF32RHSCache()
+
+
+@libentry()
+@triton.jit
+def _round_to_tf32_copy_kernel(
+    src,
+    dst,
+    n_elements,
+    n_columns,
+    stride_row,
+    stride_column,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = ext.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    rows = offsets // n_columns
+    columns = offsets - rows * n_columns
+    values = tl.load(
+        src + rows * stride_row + columns * stride_column,
+        mask=mask,
+        other=0.0,
+    )
+    tl.store(dst + offsets, ext.round_to_tf32(values), mask=mask)
+
+
+def round_to_tf32_copy(tensor):
+    """Round and materialize a logical FP32 matrix with one Triton kernel."""
+
+    assert tensor.dtype == torch.float32
+    assert tensor.ndim == 2
+    rounded = torch.empty(
+        tuple(tensor.shape),
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
+    n_elements = tensor.numel()
+    if n_elements == 0:
+        return rounded
+    grid = lambda META: (triton.cdiv(n_elements, META["BLOCK_SIZE"]),)
+    with torch_device_fn.device(tensor.device):
+        _round_to_tf32_copy_kernel[grid](
+            tensor,
+            rounded,
+            n_elements,
+            tensor.shape[1],
+            tensor.stride(0),
+            tensor.stride(1),
+            BLOCK_SIZE=1024,
+        )
+    return rounded
+
+
+def _get_rounded_tf32_rhs(mat2):
+    return _TF32_RHS_CACHE.get(mat2, round_to_tf32_copy)
 
 
 def is_supported_sqmma_layout(tensor):
@@ -424,7 +482,8 @@ def addmm_dtype_out(bias, mat1, mat2, out_dtype, *, beta=1, alpha=1, out):
     logger.debug("GEMS_MTHREADS ADDMM_DTYPE_OUT")
     if mat1.dtype != mat2.dtype:
         raise RuntimeError(
-            f"mat1 and mat2 must have the same dtype, but got {mat1.dtype} and {mat2.dtype}"
+            "mat1 and mat2 must have the same dtype, but got "
+            f"{mat1.dtype} and {mat2.dtype}"
         )
     if out.dtype != out_dtype:
         raise RuntimeError(
