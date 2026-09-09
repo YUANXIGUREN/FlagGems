@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import contextmanager
 import importlib
 
 import numpy as np
@@ -69,6 +70,17 @@ requires_s5000 = pytest.mark.skipif(
     or flag_gems.runtime.device.device_count == 0,
     reason="requires a Moore Threads accelerator",
 )
+
+
+@contextmanager
+def _mthreads_tf32(enabled):
+    backend = torch.backends.mudnn
+    previous = backend.allow_tf32
+    backend.allow_tf32 = enabled
+    try:
+        yield
+    finally:
+        backend.allow_tf32 = previous
 
 
 @triton.jit
@@ -135,3 +147,76 @@ def test_round_to_tf32_copy_materializes_logical_noncontiguous_values():
     np.testing.assert_array_equal(
         rounded.cpu().numpy().view(np.uint32), expected_bits
     )
+
+
+@requires_s5000
+def test_round_to_tf32_fp16_copy_matches_musa_truncation_for_representable_values():
+    backend_addmm = importlib.import_module(
+        "flag_gems.runtime.backend._mthreads.ops.addmm"
+    )
+    source = torch.tensor(
+        [
+            1.0007,
+            -1.0007,
+            1.0002,
+            -1.0002,
+            1.00048828125,
+            -1.00048828125,
+            1.00146484375,
+            -1.00146484375,
+        ],
+        device=flag_gems.device,
+        dtype=torch.float32,
+    ).reshape(2, 4).t()
+    expected = torch.tensor(
+        [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0,
+            1.0,
+            -1.0,
+            1.0009765625,
+            -1.0009765625,
+        ],
+        device=flag_gems.device,
+        dtype=torch.float32,
+    ).reshape(2, 4).t()
+
+    actual = backend_addmm.round_to_tf32_fp16_copy(source)
+
+    assert actual.dtype == torch.float16
+    assert actual.is_contiguous()
+    torch.testing.assert_close(actual.float(), expected, rtol=0, atol=0)
+
+
+@requires_s5000
+def test_fast_fp32_pointer_addmm_stays_close_to_native_tf32():
+    backend_addmm = importlib.import_module(
+        "flag_gems.runtime.backend._mthreads.ops.addmm"
+    )
+    values = torch.tensor(
+        [
+            1.0007,
+            -1.0007,
+            1.0002,
+            -1.0002,
+            1.00048828125,
+            -1.00048828125,
+            1.00146484375,
+            -1.00146484375,
+        ],
+        dtype=torch.float32,
+    )
+    mat1 = values.repeat(64, 8).to(flag_gems.device)
+    mat2 = torch.eye(64, dtype=torch.float32, device=flag_gems.device)
+    bias = torch.zeros(64, dtype=torch.float32, device=flag_gems.device)
+
+    with _mthreads_tf32(True), torch.inference_mode():
+        native = torch.addmm(bias, mat1, mat2).cpu()
+        fast = backend_addmm.addmm_fma(bias, mat1, mat2).cpu()
+    with _mthreads_tf32(False), torch.inference_mode():
+        strict = backend_addmm.addmm_fma(bias, mat1, mat2).cpu()
+
+    torch.testing.assert_close(fast, native, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(strict, mat1.cpu(), rtol=0, atol=0)
