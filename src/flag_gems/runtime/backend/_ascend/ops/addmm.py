@@ -54,7 +54,7 @@ def classify_addmm_layout(
 
 def select_ascend_addmm_kernel(K, layout):
     del layout
-    return "skinny_k" if K < 16 else "grouped_gemm"
+    return "skinny_k" if K == 0 else "grouped_gemm"
 
 
 def select_ascend_input_precision(M, N, K, fp32_operands, fast_enabled):

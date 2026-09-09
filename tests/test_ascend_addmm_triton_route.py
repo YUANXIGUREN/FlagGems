@@ -52,15 +52,14 @@ def test_layout_classifier_distinguishes_compact_padded_and_row_rhs():
     assert classify(512, 4096, 2, 1024, 2) == "general"
 
 
-@pytest.mark.parametrize("K", [0, 1, 4, 15])
-def test_skinny_k_selector_uses_fma_reduction(K):
+def test_empty_k_selector_uses_fma_reduction():
     select = _load_pure_function("select_ascend_addmm_kernel")
 
-    assert select(K, "a_row_b_k_padded") == "skinny_k"
+    assert select(0, "a_row_b_k_padded") == "skinny_k"
 
 
-@pytest.mark.parametrize("K", [16, 184, 512, 1024])
-def test_non_skinny_selector_uses_grouped_gemm(K):
+@pytest.mark.parametrize("K", [1, 4, 15, 16, 184, 512, 1024])
+def test_non_empty_selector_uses_grouped_gemm(K):
     select = _load_pure_function("select_ascend_addmm_kernel")
 
     assert select(K, "a_row_b_k_padded") == "grouped_gemm"
