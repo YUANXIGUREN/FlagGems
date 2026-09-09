@@ -28,6 +28,20 @@ MODULE_SPEC.loader.exec_module(audit_module)
 
 audit_paths = audit_module.audit_paths
 
+REPOSITORY_ROOT = Path(__file__).parents[1]
+TARGET_OPERATOR_PATHS = [
+    REPOSITORY_ROOT / "src/flag_gems/ops/addmm.py",
+    REPOSITORY_ROOT / "src/flag_gems/ops/add.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_ascend/ops/addmm.py",
+    REPOSITORY_ROOT / "src/flag_gems/runtime/backend/_ascend/ops/add.py",
+    REPOSITORY_ROOT / "src/flag_gems/runtime/backend/_hygon/ops/addmm.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_mthreads/ops/addmm.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_mthreads/ops/tf32_cache.py",
+]
+
 
 def test_audit_rejects_captured_native_compute_routes(tmp_path):
     source = tmp_path / "addmm.py"
@@ -124,3 +138,8 @@ def test_audit_recurses_over_python_only_and_sorts_results(tmp_path):
         ("a.py", 1, "x.redispatch"),
         ("b.py", 2, "torch.add"),
     ]
+
+
+def test_all_production_addmm_and_add_targets_are_triton_only():
+    assert all(path.is_file() for path in TARGET_OPERATOR_PATHS)
+    assert audit_paths(TARGET_OPERATOR_PATHS) == []
