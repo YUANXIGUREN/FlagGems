@@ -62,23 +62,35 @@ def test_hygon_addmm_classification_is_shape_class_based(
 
 
 @pytest.mark.parametrize(
-    "kernel_class,fp32_operands,fast_enabled",
+    "kernel_class,fp32_operands,fast_enabled,expected",
     [
-        ("skinny_k", True, True),
-        ("k184", True, True),
-        ("k512_rhs_row", True, True),
-        ("k512_rhs_k_contiguous", True, True),
-        ("k1024_plus", True, True),
-        ("general", True, True),
-        ("k512_rhs_row", False, True),
+        ("skinny_k", True, True, "ieee"),
+        ("k184", True, True, "ieee"),
+        ("k512_rhs_row", True, True, "fp16"),
+        ("k512_rhs_k_contiguous", True, True, "fp16"),
+        ("k1024_plus", True, True, "ieee"),
+        ("general", True, True, "ieee"),
+        ("k512_rhs_row", False, True, "ieee"),
+        ("k512_rhs_row", True, False, "ieee"),
     ],
 )
-def test_hygon_fast_fp32_allowlist_starts_empty(
-    kernel_class, fp32_operands, fast_enabled
+def test_hygon_fast_fp32_allowlist_is_limited_to_k512(
+    kernel_class, fp32_operands, fast_enabled, expected
 ):
     select = _load_pure_function("select_hygon_input_precision")
 
-    assert select(kernel_class, fp32_operands, fast_enabled) == "ieee"
+    assert select(kernel_class, fp32_operands, fast_enabled) == expected
+
+
+def test_hygon_k512_fast_path_downcasts_inside_owned_triton_kernel():
+    source = SOURCE_PATH.read_text()
+    general_kernel = source.split("def addmm_kernel(", 1)[1].split(
+        "\ndef addmm_skinny_k_kernel", 1
+    )[0]
+
+    assert 'if INPUT_PRECISION == "fp16":' in general_kernel
+    assert "a = a.to(tl.float16)" in general_kernel
+    assert "b = b.to(tl.float16)" in general_kernel
 
 
 def test_hygon_backend_exports_all_addmm_overloads():
@@ -128,3 +140,25 @@ def test_hygon_public_addmm_resolves_to_backend_triton_source():
         result = torch.addmm(bias, mat1, mat2)
 
     torch.testing.assert_close(result, reference, rtol=2e-5, atol=2e-4)
+
+
+@pytest.mark.skipif(flag_gems.vendor_name != "hygon", reason="Hygon-only test")
+def test_hygon_k512_fast_fp32_path_keeps_fp32_output_and_bounded_error():
+    torch.manual_seed(20260910)
+    mat1 = torch.randn((257, 512), dtype=torch.float32, device=flag_gems.device)
+    mat2 = torch.randn((512, 512), dtype=torch.float32, device=flag_gems.device)
+    bias = torch.randn((512,), dtype=torch.float32, device=flag_gems.device)
+    previous = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        strict = flag_gems.addmm(bias, mat1, mat2)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        fast = flag_gems.addmm(bias, mat1, mat2)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
+    assert fast.dtype == torch.float32
+    relative_l2 = torch.linalg.vector_norm(fast - strict) / torch.linalg.vector_norm(
+        strict
+    ).clamp_min(torch.finfo(torch.float32).tiny)
+    assert relative_l2.item() < 5e-4

@@ -42,9 +42,16 @@ def classify_hygon_addmm(K, stride_bk, stride_bn):
 
 
 def select_hygon_input_precision(kernel_class, fp32_operands, fast_enabled):
-    # The production allowlist stays empty until an isolated class passes the
-    # Iterative workloads require the configured fast-FP32 contract here.
-    del kernel_class, fp32_operands, fast_enabled
+    # DTK does not expose a hardware TF32 dot mode through Triton.  FP16 has
+    # the same ten explicit significand bits as TF32, so lower only the two
+    # K=512 GraphCast classes after the caller explicitly enables fast FP32.
+    # Accumulation and output remain FP32; strict/default execution is unchanged.
+    if (
+        fast_enabled
+        and fp32_operands
+        and kernel_class in ("k512_rhs_row", "k512_rhs_k_contiguous")
+    ):
+        return "fp16"
     return "ieee"
 
 
@@ -144,6 +151,7 @@ def addmm_kernel(
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
     BETA_IS_ZERO: tl.constexpr,
+    FUSE_SILU: tl.constexpr,
     HAS_K: tl.constexpr,
     IS_FP64: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
@@ -182,6 +190,9 @@ def addmm_kernel(
                 mask=(offs_k < k_remaining)[:, None] & (offs_n < N)[None, :],
                 other=0.0,
             )
+            if INPUT_PRECISION == "fp16":
+                a = a.to(tl.float16)
+                b = b.to(tl.float16)
             accumulator = _accumulate_dot(
                 accumulator,
                 a,
@@ -210,6 +221,9 @@ def addmm_kernel(
             )
             bias = tl.load(i_ptrs, mask=mask, other=0.0)
         result = accumulator * alpha + bias.to(accumulator.dtype) * beta
+    if FUSE_SILU:
+        value = result.to(c_ptr.dtype.element_ty).to(tl.float32)
+        result = value / (1.0 + tl.exp(-value))
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     tl.store(c_ptrs, result.to(c_ptr.dtype.element_ty), mask=mask)
 
@@ -247,6 +261,7 @@ def addmm_skinny_k_kernel(
     BIAS_IS_VECTOR: tl.constexpr,
     BIAS_IS_SCALAR: tl.constexpr,
     BETA_IS_ZERO: tl.constexpr,
+    FUSE_SILU: tl.constexpr,
     IS_FP64: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     GROUP_M: tl.constexpr,
@@ -302,11 +317,14 @@ def addmm_skinny_k_kernel(
             )
             bias = tl.load(i_ptrs, mask=mask, other=0.0)
         result = accumulator * alpha + bias.to(accumulator.dtype) * beta
+    if FUSE_SILU:
+        value = result.to(c_ptr.dtype.element_ty).to(tl.float32)
+        result = value / (1.0 + tl.exp(-value))
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     tl.store(c_ptrs, result.to(c_ptr.dtype.element_ty), mask=mask)
 
 
-def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
+def _addmm_impl(bias, mat1, mat2, out, beta, alpha, *, fuse_silu=False):
     assert mat1.shape[1] == mat2.shape[0], "Incompatible dimensions"
     assert broadcastable_to(
         bias.shape, (mat1.shape[0], mat2.shape[1])
@@ -368,6 +386,7 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
                 BIAS_IS_VECTOR=bias_is_vector,
                 BIAS_IS_SCALAR=bias_is_scalar,
                 BETA_IS_ZERO=beta == 0,
+                FUSE_SILU=fuse_silu,
                 IS_FP64=mat1.dtype == torch.float64,
                 ALLOW_TF32=input_precision == "tf32",
                 GROUP_M=8,
@@ -401,6 +420,7 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
             BIAS_IS_VECTOR=bias_is_vector,
             BIAS_IS_SCALAR=bias_is_scalar,
             BETA_IS_ZERO=beta == 0,
+            FUSE_SILU=fuse_silu,
             HAS_K=K > 0,
             IS_FP64=mat1.dtype == torch.float64,
             ALLOW_TF32=input_precision == "tf32",
@@ -413,6 +433,21 @@ def _addmm_impl(bias, mat1, mat2, out, beta, alpha):
 def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
     logger.debug("GEMS_HYGON ADDMM")
     return _addmm_impl(bias, mat1, mat2, None, beta, alpha)
+
+
+def addmm_silu(bias, mat1, mat2, *, beta=1, alpha=1):
+    """Compute SiLU(AddMM) in the Hygon-owned Triton GEMM epilogue."""
+
+    logger.debug("GEMS_HYGON ADDMM_SILU")
+    return _addmm_impl(
+        bias,
+        mat1,
+        mat2,
+        None,
+        beta,
+        alpha,
+        fuse_silu=True,
+    )
 
 
 def addmm_out(bias, mat1, mat2, *, beta=1, alpha=1, out=None):

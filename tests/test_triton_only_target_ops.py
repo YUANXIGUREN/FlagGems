@@ -45,6 +45,15 @@ TARGET_OPERATOR_PATHS = [
     REPOSITORY_ROOT
     / "src/flag_gems/runtime/backend/_ascend/fused/add_add_silu.py",
     REPOSITORY_ROOT / "src/flag_gems/runtime/backend/_hygon/ops/addmm.py",
+    REPOSITORY_ROOT / "src/flag_gems/runtime/backend/_hygon/ops/index_add.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_hygon/fused/add_add_silu.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_hygon/fused/addmm_silu.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_hygon/fused/gather_gather_add_silu.py",
+    REPOSITORY_ROOT
+    / "src/flag_gems/runtime/backend/_hygon/fused/post_layernorm_residual.py",
     REPOSITORY_ROOT
     / "src/flag_gems/runtime/backend/_mthreads/ops/addmm.py",
     REPOSITORY_ROOT
